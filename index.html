@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inventory Actions</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:18px;color:#262633;background:#fff}
+.card{border:1px solid #d9d9df;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.name{font-size:1.35rem;font-weight:700;margin-bottom:4px}
+.id{font-family:monospace;color:#6b6b78;margin-bottom:18px}
+.row{display:grid;grid-template-columns:90px 1fr;gap:10px;margin:8px 0}
+.label{font-weight:600;color:#555563}
+button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;font-size:1rem;font-weight:700;cursor:pointer;background:#16b378;color:white}
+button:disabled{background:#b8bcc2;cursor:not-allowed}
+.message{margin-top:14px;padding:10px 12px;border-radius:8px;display:none}
+.success{display:block;background:#e9f8f1;color:#126a4a}
+.error{display:block;background:#fdeeee;color:#9b2525}
+.empty{padding:24px 8px;text-align:center;color:#777784}
+</style>
+</head>
+<body>
+<div id="app" class="card"><div class="empty">Select an inventory item.</div></div>
+<script>
+let currentRecord=null;
+let busy=false;
+
+grist.ready({requiredAccess:'full'});
+
+function esc(v){
+  return String(v ?? '')
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'",'&#039;');
+}
+
+function render(record){
+  currentRecord=record||null;
+  const app=document.getElementById('app');
+  if(!record||!record.id){
+    app.innerHTML='<div class="empty">Select an inventory item.</div>';
+    return;
+  }
+  const status=record.Status||'';
+  const closed=['Used','Consumed','Discarded'].includes(status);
+  app.innerHTML=`
+    <div class="name">${esc(record.ItemName||'Unnamed item')}</div>
+    <div class="id">${esc(record.AutoItemID||record.ItemID||('Row '+record.id))}</div>
+    <div class="row"><div class="label">Type</div><div>${esc(record.ItemType||'')}</div></div>
+    <div class="row"><div class="label">Status</div><div>${esc(status)}</div></div>
+    <div class="row"><div class="label">Location</div><div>${esc(record.LocationID||'')}</div></div>
+    <button id="usedBtn" ${closed||busy?'disabled':''}>${closed?'ALREADY USED / CLOSED':(busy?'WORKING…':'MARK USED')}</button>
+    <div id="message" class="message"></div>`;
+  const btn=document.getElementById('usedBtn');
+  if(btn&&!closed){btn.addEventListener('click',markUsed);}
+}
+
+function showMessage(text,type='success'){
+  const el=document.getElementById('message');
+  if(!el)return;
+  el.className='message '+type;
+  el.textContent=text;
+}
+
+async function markUsed(){
+  if(!currentRecord||!currentRecord.id||busy)return;
+  const itemName=currentRecord.ItemName||currentRecord.AutoItemID||currentRecord.ItemID||('row '+currentRecord.id);
+  if(!confirm(`Mark "${itemName}" as Used?`))return;
+  busy=true; render(currentRecord);
+  try{
+    await grist.docApi.applyUserActions([
+      ['UpdateRecord','Inventory',currentRecord.id,{Status:'Used'}],
+      ['AddRecord','Events',null,{
+        Item:currentRecord.id,
+        EventType:'Used',
+        Notes:'Marked Used from Inventory Manager'
+      }]
+    ]);
+    showMessage('Item marked Used and event created.','success');
+  }catch(err){
+    console.error(err);
+    showMessage('Could not update item: '+(err.message||err),'error');
+  }finally{
+    busy=false;
+  }
+}
+
+grist.onRecord(function(record){render(record);});
+</script>
+</body>
+</html>
