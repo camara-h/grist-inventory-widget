@@ -6,25 +6,48 @@
 <title>Inventory Actions</title>
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:18px;color:#262633;background:#fff}
+:root{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color:#262633;background:#fff;
+}
+body{margin:0;padding:18px}
 .card{border:1px solid #d9d9df;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 .name{font-size:1.35rem;font-weight:700;margin-bottom:4px}
-.id{font-family:monospace;color:#6b6b78;margin-bottom:18px}
+.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#6b6b78;margin-bottom:18px}
 .row{display:grid;grid-template-columns:90px 1fr;gap:10px;margin:8px 0}
 .label{font-weight:600;color:#555563}
-button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;font-size:1rem;font-weight:700;cursor:pointer;background:#16b378;color:white}
-button:disabled{background:#b8bcc2;cursor:not-allowed}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}
+button{padding:12px;border:0;border-radius:8px;font-size:.98rem;font-weight:700;cursor:pointer}
+button:disabled{background:#b8bcc2!important;color:white;cursor:not-allowed}
+.primary{background:#16b378;color:white}
+.secondary{background:#eef1f4;color:#30343a}
+.danger{background:#b8bcc2;color:white}
 .message{margin-top:14px;padding:10px 12px;border-radius:8px;display:none}
 .success{display:block;background:#e9f8f1;color:#126a4a}
 .error{display:block;background:#fdeeee;color:#9b2525}
+.warning{display:block;background:#fff6dd;color:#775500}
 .empty{padding:24px 8px;text-align:center;color:#777784}
+.relocate{margin-top:16px;padding-top:16px;border-top:1px solid #ececf0;display:none}
+.relocate.open{display:block}
+.relocate label{display:block;font-weight:600;margin:8px 0 6px}
+input,select{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #cfd2d7;border-radius:7px;background:white;font-size:.95rem}
+.location-count{font-size:.82rem;color:#777784;margin-top:6px}
 </style>
 </head>
 <body>
 <div id="app" class="card"><div class="empty">Select an inventory item.</div></div>
+
 <script>
-let currentRecord=null;
-let busy=false;
+const INVENTORY_TABLE = 'Inventory';
+const EVENTS_TABLE = 'Events';
+const LOCATION_TABLE_CANDIDATES = ['Location_Inventory', 'LocationInventory', 'Locations'];
+
+let currentRecord = null;
+let busy = false;
+let resolvedInventoryRowId = null;
+let currentLocationRef = null;
+let locations = [];
+let locationTableId = null;
 
 grist.ready({requiredAccess:'full'});
 
@@ -37,25 +60,133 @@ function esc(v){
     .replaceAll("'",'&#039;');
 }
 
+function normalizeRef(v){
+  // Grist Reference values are normally numeric row IDs.
+  // If a richer value sneaks through, handle the common ['R', id] representation too.
+  if (typeof v === 'number') return v;
+  if (Array.isArray(v) && v.length >= 2 && v[0] === 'R') return v[1];
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function tableRowIndex(table, rowId){
+  if (!table || !Array.isArray(table.id)) return -1;
+  return table.id.findIndex(x => Number(x) === Number(rowId));
+}
+
+async function resolveSelectedInventoryRow(){
+  const table = await grist.docApi.fetchTable(INVENTORY_TABLE);
+
+  // First try the selected Grist row id.
+  if (currentRecord && currentRecord.id != null) {
+    const idx = tableRowIndex(table, currentRecord.id);
+    if (idx >= 0) return {table, idx, rowId: table.id[idx]};
+  }
+
+  // Fallback: match stable visible IDs.
+  const wanted = currentRecord?.AutoItemID || currentRecord?.ItemID;
+  if (wanted) {
+    for (const col of ['AutoItemID','ItemID']) {
+      if (Array.isArray(table[col])) {
+        const idx = table[col].findIndex(v => String(v ?? '') === String(wanted));
+        if (idx >= 0) return {table, idx, rowId: table.id[idx]};
+      }
+    }
+  }
+
+  throw new Error('Could not resolve the selected Inventory row.');
+}
+
+async function findLocationTable(){
+  for (const candidate of LOCATION_TABLE_CANDIDATES) {
+    try {
+      const t = await grist.docApi.fetchTable(candidate);
+      if (t && Array.isArray(t.id)) return {id:candidate, table:t};
+    } catch (e) {}
+  }
+  throw new Error('Could not find the location table. Expected a table ID such as Location_Inventory.');
+}
+
+function locationLabel(table, idx){
+  const lid = table.LocationID?.[idx] ?? `Row ${table.id[idx]}`;
+  const desc = table.Description?.[idx] ?? '';
+  const name = table.Name?.[idx] ?? '';
+  const type = table.Type?.[idx] ?? '';
+
+  if (desc) return `${lid} · ${desc}`;
+  if (name) return `${lid} · ${name}${type ? ` (${type})` : ''}`;
+  return `${lid}${type ? ` · ${type}` : ''}`;
+}
+
+async function loadContext(){
+  const inv = await resolveSelectedInventoryRow();
+  resolvedInventoryRowId = inv.rowId;
+  currentLocationRef = normalizeRef(inv.table.LocationID?.[inv.idx]);
+
+  const loc = await findLocationTable();
+  locationTableId = loc.id;
+  locations = loc.table.id.map((rowId, idx) => ({
+    rowId,
+    label: locationLabel(loc.table, idx),
+    type: loc.table.Type?.[idx] ?? ''
+  }));
+}
+
+function statusIsClosed(status){
+  return ['Used','Consumed','Discarded'].includes(String(status || ''));
+}
+
 function render(record){
-  currentRecord=record||null;
-  const app=document.getElementById('app');
-  if(!record||!record.id){
+  currentRecord = record || null;
+  resolvedInventoryRowId = null;
+  currentLocationRef = null;
+
+  const app = document.getElementById('app');
+  if(!record || !record.id){
     app.innerHTML='<div class="empty">Select an inventory item.</div>';
     return;
   }
-  const status=record.Status||'';
-  const closed=['Used','Consumed','Discarded'].includes(status);
-  app.innerHTML=`
-    <div class="name">${esc(record.ItemName||'Unnamed item')}</div>
-    <div class="id">${esc(record.AutoItemID||record.ItemID||('Row '+record.id))}</div>
-    <div class="row"><div class="label">Type</div><div>${esc(record.ItemType||'')}</div></div>
+
+  const status = record.Status || '';
+  const closed = statusIsClosed(status);
+
+  app.innerHTML = `
+    <div class="name">${esc(record.ItemName || 'Unnamed item')}</div>
+    <div class="id">${esc(record.AutoItemID || record.ItemID || ('Row ' + record.id))}</div>
+
+    <div class="row"><div class="label">Type</div><div>${esc(record.ItemType || '')}</div></div>
     <div class="row"><div class="label">Status</div><div>${esc(status)}</div></div>
-    <div class="row"><div class="label">Location</div><div>${esc(record.LocationID||'')}</div></div>
-    <button id="usedBtn" ${closed||busy?'disabled':''}>${closed?'ALREADY USED / CLOSED':(busy?'WORKING…':'MARK USED')}</button>
-    <div id="message" class="message"></div>`;
-  const btn=document.getElementById('usedBtn');
-  if(btn&&!closed){btn.addEventListener('click',markUsed);}
+    <div class="row"><div class="label">Location</div><div>${esc(record.LocationID || '')}</div></div>
+
+    <div class="actions">
+      <button id="usedBtn" class="primary" ${closed || busy ? 'disabled' : ''}>
+        ${closed ? 'USED / CLOSED' : (busy ? 'WORKING…' : 'MARK USED')}
+      </button>
+      <button id="relocateBtn" class="secondary" ${busy ? 'disabled' : ''}>RELOCATE</button>
+    </div>
+
+    <div id="relocatePanel" class="relocate">
+      <label for="locationSearch">Find destination</label>
+      <input id="locationSearch" type="text" placeholder="Search ID, room, freezer, shelf, box...">
+      <label for="locationSelect">Destination</label>
+      <select id="locationSelect"></select>
+      <div id="locationCount" class="location-count"></div>
+      <div class="actions">
+        <button id="cancelRelocate" class="secondary">CANCEL</button>
+        <button id="confirmRelocate" class="primary">MOVE ITEM</button>
+      </div>
+    </div>
+
+    <div id="message" class="message"></div>
+  `;
+
+  const usedBtn = document.getElementById('usedBtn');
+  if(usedBtn && !closed) usedBtn.addEventListener('click', markUsed);
+
+  document.getElementById('relocateBtn').addEventListener('click', openRelocate);
+  document.getElementById('cancelRelocate').addEventListener('click', closeRelocate);
+  document.getElementById('confirmRelocate').addEventListener('click', relocateItem);
+  document.getElementById('locationSearch').addEventListener('input', refreshLocationOptions);
 }
 
 function showMessage(text,type='success'){
@@ -65,30 +196,133 @@ function showMessage(text,type='success'){
   el.textContent=text;
 }
 
+function setBusy(value){
+  busy = value;
+  if (currentRecord) render(currentRecord);
+}
+
 async function markUsed(){
-  if(!currentRecord||!currentRecord.id||busy)return;
-  const itemName=currentRecord.ItemName||currentRecord.AutoItemID||currentRecord.ItemID||('row '+currentRecord.id);
-  if(!confirm(`Mark "${itemName}" as Used?`))return;
-  busy=true; render(currentRecord);
+  if(!currentRecord || busy) return;
+
+  const itemName=currentRecord.ItemName || currentRecord.AutoItemID || currentRecord.ItemID || `row ${currentRecord.id}`;
+  if(!confirm(`Mark "${itemName}" as Used?`)) return;
+
+  busy = true;
+  render(currentRecord);
+
   try{
+    await loadContext();
+
+    // Use the resolved raw Grist row ID for the Events.Item reference.
     await grist.docApi.applyUserActions([
-      ['UpdateRecord','Inventory',currentRecord.id,{Status:'Used'}],
-      ['AddRecord','Events',null,{
-        Item:currentRecord.id,
+      ['UpdateRecord', INVENTORY_TABLE, resolvedInventoryRowId, {Status:'Used'}],
+      ['AddRecord', EVENTS_TABLE, null, {
+        Item: resolvedInventoryRowId,
         EventType:'Used',
         Notes:'Marked Used from Inventory Manager'
       }]
     ]);
+
     showMessage('Item marked Used and event created.','success');
   }catch(err){
     console.error(err);
-    showMessage('Could not update item: '+(err.message||err),'error');
+    showMessage('Could not update item: '+(err.message || err),'error');
   }finally{
-    busy=false;
+    busy = false;
   }
 }
 
-grist.onRecord(function(record){render(record);});
+async function openRelocate(){
+  if(!currentRecord || busy) return;
+  try{
+    showMessage('Loading locations…','warning');
+    await loadContext();
+    document.getElementById('message').className='message';
+    document.getElementById('relocatePanel').classList.add('open');
+    document.getElementById('locationSearch').value='';
+    refreshLocationOptions();
+  }catch(err){
+    console.error(err);
+    showMessage('Could not load locations: '+(err.message || err),'error');
+  }
+}
+
+function closeRelocate(){
+  const panel=document.getElementById('relocatePanel');
+  if(panel) panel.classList.remove('open');
+}
+
+function refreshLocationOptions(){
+  const search=(document.getElementById('locationSearch')?.value || '').toLowerCase().trim();
+  const select=document.getElementById('locationSelect');
+  const count=document.getElementById('locationCount');
+  if(!select) return;
+
+  const filtered = locations.filter(loc => !search || loc.label.toLowerCase().includes(search));
+
+  select.innerHTML = '';
+  for(const loc of filtered){
+    const option=document.createElement('option');
+    option.value=String(loc.rowId);
+    option.textContent=loc.label + (Number(loc.rowId)===Number(currentLocationRef) ? '  [CURRENT]' : '');
+    if(Number(loc.rowId)===Number(currentLocationRef)) option.selected=true;
+    select.appendChild(option);
+  }
+
+  if(count) count.textContent=`${filtered.length} matching location${filtered.length===1?'':'s'}`;
+}
+
+async function relocateItem(){
+  if(!currentRecord || busy) return;
+
+  const select=document.getElementById('locationSelect');
+  const toRef = normalizeRef(select?.value);
+  if(!toRef){
+    showMessage('Choose a destination location.','error');
+    return;
+  }
+  if(Number(toRef)===Number(currentLocationRef)){
+    showMessage('That is already the current location.','warning');
+    return;
+  }
+
+  const selectedOption=select.options[select.selectedIndex]?.textContent || `location row ${toRef}`;
+  const itemName=currentRecord.ItemName || currentRecord.AutoItemID || currentRecord.ItemID || `row ${currentRecord.id}`;
+
+  if(!confirm(`Relocate "${itemName}" to:\n\n${selectedOption}?`)) return;
+
+  busy = true;
+
+  try{
+    // Refresh raw references just before committing.
+    await loadContext();
+
+    const fromRef = currentLocationRef;
+
+    await grist.docApi.applyUserActions([
+      ['UpdateRecord', INVENTORY_TABLE, resolvedInventoryRowId, {LocationID: toRef}],
+      ['AddRecord', EVENTS_TABLE, null, {
+        Item: resolvedInventoryRowId,
+        EventType:'Relocated',
+        FromLocation: fromRef || null,
+        ToLocation: toRef,
+        Notes:'Relocated from Inventory Manager'
+      }]
+    ]);
+
+    closeRelocate();
+    showMessage('Item relocated and relocation event created.','success');
+  }catch(err){
+    console.error(err);
+    showMessage('Could not relocate item: '+(err.message || err),'error');
+  }finally{
+    busy = false;
+  }
+}
+
+grist.onRecord(function(record){
+  render(record);
+});
 </script>
 </body>
 </html>

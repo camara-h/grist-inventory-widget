@@ -1,31 +1,50 @@
-# Grist Inventory Actions MVP
+# Grist Inventory Widget v2
 
-This widget is linked to the Inventory table.
+Changes from the first MVP:
 
-It displays the selected item and provides one action:
-MARK USED
+- Fixes Events.Item by resolving the selected Inventory record to its raw Grist row ID before creating the event.
+- Adds a Relocate workflow.
+- Relocate:
+  - loads existing locations from the Grist location table,
+  - lets the user search the full location label/path,
+  - updates Inventory.LocationID,
+  - creates a Relocated event,
+  - records FromLocation and ToLocation.
 
-On click it:
-1. Updates Inventory.Status to Used.
-2. Adds a Used event to Events.
+## Expected table IDs
 
-Required Grist table IDs:
 - Inventory
 - Events
+- Location_Inventory
 
-Required columns:
-Inventory: ItemID or AutoItemID, ItemName, ItemType, Status, LocationID
-Events: Item (Reference -> Inventory), EventType, Notes
+The widget also tries LocationInventory and Locations as fallback table IDs.
 
-## GitHub Pages
-1. Create a public repository, e.g. grist-inventory-widget
-2. Upload index.html to the repository root
-3. Settings -> Pages
-4. Deploy from a branch
-5. Select main and /(root)
-6. Save
-7. Copy the published URL into the Grist Custom URL field
-8. Set Access Level to Full document access
-9. Link the widget to Inventory using Select By
+## Required columns
 
-Test on a copy of the Grist document first.
+Inventory:
+- ItemID or AutoItemID
+- ItemName
+- ItemType
+- Status
+- LocationID (Reference -> location table)
+
+Events:
+- Item (Reference -> Inventory)
+- EventType
+- FromLocation (Reference -> location table)
+- ToLocation (Reference -> location table)
+- Notes
+
+Location_Inventory:
+- LocationID
+- Description
+- Name (optional)
+- Type (optional)
+
+## Update your GitHub Pages widget
+
+Replace the existing index.html in your GitHub repository with this version and commit it.
+
+GitHub Pages should redeploy automatically. Refresh/reload the custom widget in Grist after deployment.
+
+Keep the widget Access Level set to Full document access.
