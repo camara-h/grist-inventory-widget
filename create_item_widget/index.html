@@ -201,6 +201,9 @@ async function setup(){
 
     metadataFields=metaT.id.map((id,i)=>({
       rowId:id,
+      // ItemType is allowed to be either:
+      // 1) a Grist Reference -> ItemTypes (stored internally as that row's numeric id), or
+      // 2) plain text containing the TypeName.
       ItemType:metaT.ItemType?.[i] ?? '',
       FieldName:metaT.FieldName?.[i] ?? '',
       Label:metaT.Label?.[i] ?? '',
@@ -226,10 +229,24 @@ async function setup(){
   }catch(e){showStatus('Setup error: '+(e.message||e),'err');}
 }
 
+function sameItemType(fieldItemType, typeObj){
+  if(!typeObj) return false;
+
+  // If MetadataFields.ItemType is a Reference -> ItemTypes,
+  // Grist exposes the raw referenced row id to the custom widget.
+  const numeric = Number(fieldItemType);
+  if(Number.isFinite(numeric) && numeric > 0 && Number(typeObj.rowId) === numeric){
+    return true;
+  }
+
+  // Also support plain-text configuration for flexibility.
+  return normName(fieldItemType) === normName(typeObj.TypeName);
+}
+
 function onTypeChange(){
   clearStatus();
   currentType=itemTypes.find(x=>x.TypeName===document.getElementById('itemType').value);
-  currentFields=sortFields(metadataFields.filter(f=>String(f.ItemType)===String(currentType?.TypeName)));
+  currentFields=sortFields(metadataFields.filter(f=>sameItemType(f.ItemType,currentType)));
 
   const shared=currentFields.filter(f=>boolish(f.SharedInBatch));
   const perRow=currentFields.filter(f=>!boolish(f.SharedInBatch));
@@ -239,6 +256,15 @@ function onTypeChange(){
   document.getElementById('sharedCard').style.display=shared.length?'block':'none';
 
   buildGrid(perRow);
+
+  if(currentFields.length===0){
+    showStatus(
+      `No MetadataFields matched "${currentType?.TypeName}". `+
+      `If MetadataFields.ItemType is a Reference to ItemTypes, this version supports that relationship. `+
+      `Check that each metadata row actually references the intended ItemTypes record.`,
+      'warn'
+    );
+  }
 }
 
 function buildGrid(perRow){
