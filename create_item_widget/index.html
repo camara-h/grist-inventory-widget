@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Create Items</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#252631;background:#fff}
+body{margin:0;padding:18px}
+h1{font-size:1.35rem;margin:0 0 4px}.sub{color:#6d6f78;font-size:.92rem;margin-bottom:18px}
+.card{border:1px solid #dfe1e6;border-radius:12px;padding:16px;margin-bottom:14px}
+.grid2,.grid3{display:grid;gap:12px}.grid2{grid-template-columns:1fr 1fr}.grid3{grid-template-columns:repeat(3,1fr)}
+label{display:block;font-size:.82rem;font-weight:650;color:#555864;margin:0 0 5px}
+input,select,textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #cfd3da;border-radius:7px;background:#fff;font-size:.93rem}
+.table-wrap{overflow:auto;border:1px solid #dfe1e6;border-radius:9px}
+table{border-collapse:collapse;width:100%;min-width:760px}
+th,td{border-bottom:1px solid #e8e9ed;border-right:1px solid #e8e9ed;padding:0}
+th{background:#f6f7f9;padding:9px 8px;text-align:left;font-size:.82rem;position:sticky;top:0;z-index:1}
+td:first-child,th:first-child{width:40px;text-align:center;color:#777}
+td input,td select{border:0;border-radius:0;padding:8px}
+td input:focus,td select:focus{outline:2px solid #16b378;outline-offset:-2px}
+.toolbar{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
+button{border:0;border-radius:8px;padding:10px 13px;font-weight:700;cursor:pointer}
+.primary{background:#16b378;color:#fff}.secondary{background:#eef1f4;color:#30343a}.danger{background:#f8eaea;color:#942d2d}
+button:disabled{opacity:.5;cursor:not-allowed}
+.status{padding:11px 12px;border-radius:8px;margin-top:12px;display:none;white-space:pre-wrap}
+.ok{display:block;background:#eaf8f2;color:#136846}.warn{display:block;background:#fff6dc;color:#765600}.err{display:block;background:#fdeeee;color:#962828}
+.summary{font-size:.9rem;color:#565965}.small{font-size:.8rem;color:#777b83}.bad{background:#fff0f0}.good{background:#f0fbf6}
+.section-title{font-size:.95rem;font-weight:750;margin-bottom:10px}.pill{display:inline-block;background:#eef1f4;padding:4px 8px;border-radius:999px;font-size:.78rem;color:#555864}
+@media(max-width:800px){.grid2,.grid3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>Create Items</h1>
+<div class="sub">One universal intake form. Choose an ItemType and the metadata form is generated from Grist configuration tables.</div>
+
+<div class="card">
+  <div class="grid2">
+    <div>
+      <label>Item Type</label>
+      <select id="itemType"></select>
+    </div>
+    <div>
+      <label>Location</label>
+      <select id="location"></select>
+    </div>
+    <div>
+      <label>Project (optional)</label>
+      <input id="project" placeholder="e.g. HC131">
+    </div>
+    <div>
+      <label>Status</label>
+      <input value="Active" disabled>
+    </div>
+  </div>
+</div>
+
+<div class="card" id="sharedCard">
+  <div class="section-title">Shared metadata <span class="pill">applies to every row</span></div>
+  <div id="sharedFields" class="grid3"></div>
+</div>
+
+<div class="card">
+  <div class="section-title">Batch rows</div>
+  <div class="toolbar">
+    <button class="secondary" id="addRows">+ 10 rows</button>
+    <button class="secondary" id="clearBlank">Remove blank rows</button>
+    <button class="danger" id="clearAll">Clear all</button>
+    <span class="small">Paste a rectangular block directly from Excel into any grid cell.</span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead id="thead"></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="toolbar">
+    <button class="secondary" id="validateBtn">Validate</button>
+    <span id="summary" class="summary">0 items entered</span>
+  </div>
+
+  <button class="primary" id="createBtn">CREATE VALID ITEMS</button>
+  <div id="statusBox" class="status"></div>
+</div>
+
+<script>
+const INVENTORY_TABLE='Inventory';
+const EVENTS_TABLE='Events';
+const LOCATION_CANDIDATES=['Location_Inventory','LocationInventory','Locations'];
+const ITEMTYPE_CANDIDATES=['ItemTypes','Item_Types'];
+const METADATA_CANDIDATES=['MetadataFields','Metadata_Fields'];
+
+let itemTypesTableId=null, metadataTableId=null, locationTableId=null;
+let itemTypes=[], metadataFields=[], currentType=null, currentFields=[];
+let busy=false;
+
+grist.ready({requiredAccess:'full'});
+
+function normName(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
+async function findTable(candidates, requiredColumns=[]){
+  const tables=await grist.docApi.listTables();
+  for(const c of candidates){if(tables.includes(c)) return c;}
+  const wanted=candidates.map(normName);
+  for(const id of tables){
+    const n=normName(id);
+    if(wanted.some(w=>n===w||n.startsWith(w)||w.startsWith(n))) return id;
+  }
+  for(const id of tables){
+    try{
+      const t=await grist.docApi.fetchTable(id);
+      const cols=new Set(Object.keys(t));
+      if(requiredColumns.every(c=>cols.has(c))) return id;
+    }catch(e){}
+  }
+  return null;
+}
+
+function showStatus(msg,type='ok'){const el=document.getElementById('statusBox');el.className='status '+type;el.textContent=msg;}
+function clearStatus(){const el=document.getElementById('statusBox');el.className='status';el.textContent='';}
+
+function locationLabel(t,i){
+  const lid=t.LocationID?.[i] ?? `Row ${t.id[i]}`;
+  const desc=t.Description?.[i] ?? '';
+  const name=t.Name?.[i] ?? '';
+  return desc ? `${lid} · ${desc}` : (name ? `${lid} · ${name}` : String(lid));
+}
+
+function parseOptions(v){
+  if(v==null||v==='') return [];
+  if(Array.isArray(v)) return v.map(String);
+  return String(v).split(/[,;\n]/).map(x=>x.trim()).filter(Boolean);
+}
+function boolish(v){return v===true || v===1 || String(v).toLowerCase()==='true' || String(v).toLowerCase()==='yes';}
+
+function fieldInputHTML(f, shared=false){
+  const id=(shared?'shared_':'row_')+f.FieldName;
+  const req=boolish(f.Required)?' *':'';
+  const def=f.DefaultValue ?? '';
+  const opts=parseOptions(f.Options);
+  const type=String(f.FieldType||'Text').toLowerCase();
+
+  if(type==='choice' && opts.length){
+    return `<div><label>${f.Label||f.FieldName}${req}</label><select id="${id}" data-field="${f.FieldName}">
+      <option value=""></option>${opts.map(o=>`<option ${String(o)===String(def)?'selected':''}>${o}</option>`).join('')}
+    </select></div>`;
+  }
+  if(type==='date'){
+    return `<div><label>${f.Label||f.FieldName}${req}</label><input id="${id}" data-field="${f.FieldName}" type="date" value="${def||''}"></div>`;
+  }
+  if(type==='number'){
+    return `<div><label>${f.Label||f.FieldName}${req}</label><input id="${id}" data-field="${f.FieldName}" type="number" value="${def||''}"></div>`;
+  }
+  return `<div><label>${f.Label||f.FieldName}${req}</label><input id="${id}" data-field="${f.FieldName}" value="${def||''}"></div>`;
+}
+
+function sortFields(fields){
+  return [...fields].sort((a,b)=>(Number(a.Order||999)-Number(b.Order||999)) || String(a.FieldName).localeCompare(String(b.FieldName)));
+}
+
+async function setup(){
+  try{
+    [locationTableId,itemTypesTableId,metadataTableId]=await Promise.all([
+      findTable(LOCATION_CANDIDATES,['LocationID']),
+      findTable(ITEMTYPE_CANDIDATES,['TypeName','MetadataTable']),
+      findTable(METADATA_CANDIDATES,['ItemType','FieldName','FieldType'])
+    ]);
+
+    if(!locationTableId || !itemTypesTableId || !metadataTableId){
+      const tables=await grist.docApi.listTables();
+      showStatus(
+        'Configuration tables are missing.\n\nNeed:\n'+
+        '- ItemTypes with TypeName, MetadataTable, Active\n'+
+        '- MetadataFields with ItemType, FieldName, Label, FieldType, Required, SharedInBatch, DefaultValue, Options, Order\n'+
+        '- Locations table\n\nCurrent Grist table IDs:\n'+tables.join(', '),
+        'warn'
+      );
+      return;
+    }
+
+    const [locT,typeT,metaT]=await Promise.all([
+      grist.docApi.fetchTable(locationTableId),
+      grist.docApi.fetchTable(itemTypesTableId),
+      grist.docApi.fetchTable(metadataTableId)
+    ]);
+
+    const locSel=document.getElementById('location');
+    locSel.innerHTML='';
+    locT.id.forEach((id,i)=>{
+      const o=document.createElement('option');o.value=String(id);o.textContent=locationLabel(locT,i);locSel.appendChild(o);
+    });
+
+    itemTypes=typeT.id.map((id,i)=>({
+      rowId:id,
+      TypeName:typeT.TypeName?.[i] ?? '',
+      MetadataTable:typeT.MetadataTable?.[i] ?? '',
+      Active:typeT.Active?.[i] ?? true
+    })).filter(x=>x.TypeName && boolish(x.Active));
+
+    metadataFields=metaT.id.map((id,i)=>({
+      rowId:id,
+      ItemType:metaT.ItemType?.[i] ?? '',
+      FieldName:metaT.FieldName?.[i] ?? '',
+      Label:metaT.Label?.[i] ?? '',
+      FieldType:metaT.FieldType?.[i] ?? 'Text',
+      Required:metaT.Required?.[i] ?? false,
+      SharedInBatch:metaT.SharedInBatch?.[i] ?? false,
+      DefaultValue:metaT.DefaultValue?.[i] ?? '',
+      Options:metaT.Options?.[i] ?? '',
+      Order:metaT.Order?.[i] ?? 999,
+      Active:metaT.Active?.[i] ?? true
+    })).filter(x=>x.FieldName && boolish(x.Active));
+
+    const typeSel=document.getElementById('itemType');
+    typeSel.innerHTML='';
+    itemTypes.forEach(t=>{
+      const o=document.createElement('option');o.value=t.TypeName;o.textContent=t.TypeName;typeSel.appendChild(o);
+    });
+
+    typeSel.addEventListener('change',onTypeChange);
+    if(itemTypes.length){typeSel.value=itemTypes[0].TypeName;onTypeChange();}
+    else showStatus('No active ItemTypes were found.','warn');
+
+  }catch(e){showStatus('Setup error: '+(e.message||e),'err');}
+}
+
+function onTypeChange(){
+  clearStatus();
+  currentType=itemTypes.find(x=>x.TypeName===document.getElementById('itemType').value);
+  currentFields=sortFields(metadataFields.filter(f=>String(f.ItemType)===String(currentType?.TypeName)));
+
+  const shared=currentFields.filter(f=>boolish(f.SharedInBatch));
+  const perRow=currentFields.filter(f=>!boolish(f.SharedInBatch));
+
+  const sharedDiv=document.getElementById('sharedFields');
+  sharedDiv.innerHTML=shared.map(f=>fieldInputHTML(f,true)).join('');
+  document.getElementById('sharedCard').style.display=shared.length?'block':'none';
+
+  buildGrid(perRow);
+}
+
+function buildGrid(perRow){
+  document.getElementById('thead').innerHTML=
+    `<tr><th>#</th><th>ItemName *</th>${perRow.map(f=>`<th>${f.Label||f.FieldName}${boolish(f.Required)?' *':''}</th>`).join('')}</tr>`;
+  document.getElementById('tbody').innerHTML='';
+  addRows(10);
+}
+
+function rowTemplate(n){
+  const perRow=currentFields.filter(f=>!boolish(f.SharedInBatch));
+  return `<tr data-row="${n}">
+    <td>${n+1}</td>
+    <td><input data-col="ItemName"></td>
+    ${perRow.map(f=>{
+      const opts=parseOptions(f.Options);
+      const type=String(f.FieldType||'Text').toLowerCase();
+      if(type==='choice' && opts.length){
+        return `<td><select data-col="${f.FieldName}"><option value=""></option>${opts.map(o=>`<option>${o}</option>`).join('')}</select></td>`;
+      }
+      return `<td><input data-col="${f.FieldName}" ${type==='date'?'type="date"':''} ${type==='number'?'type="number"':''}></td>`;
+    }).join('')}
+  </tr>`;
+}
+function addRows(count=10){
+  const body=document.getElementById('tbody'),start=body.children.length;
+  for(let i=0;i<count;i++) body.insertAdjacentHTML('beforeend',rowTemplate(start+i));
+  attachHandlers();updateSummary();
+}
+function getRows(){
+  return [...document.querySelectorAll('#tbody tr')].map(tr=>{
+    const obj={};tr.querySelectorAll('[data-col]').forEach(inp=>obj[inp.dataset.col]=String(inp.value||'').trim());obj._tr=tr;return obj;
+  });
+}
+function activeRows(){
+  return getRows().filter(r=>Object.entries(r).some(([k,v])=>k!=='_tr'&&String(v||'').trim()!==''));
+}
+function attachHandlers(){
+  document.querySelectorAll('#tbody [data-col]').forEach(inp=>{
+    if(inp.dataset.bound==='1')return;inp.dataset.bound='1';
+    inp.addEventListener('input',updateSummary);
+    inp.addEventListener('paste',e=>{
+      const text=e.clipboardData.getData('text/plain');
+      if(!text.includes('\t')&&!text.includes('\n'))return;
+      e.preventDefault();
+      const tr=inp.closest('tr'),rows=[...tr.parentNode.children],rowIndex=rows.indexOf(tr);
+      const cells=[...tr.querySelectorAll('[data-col]')],colIndex=cells.indexOf(inp);
+      const matrix=text.replace(/\r/g,'').split('\n').filter((x,i,a)=>!(i===a.length-1&&x==='')).map(r=>r.split('\t'));
+      matrix.forEach((arr,ri)=>arr.forEach((v,ci)=>setCell(rowIndex+ri,colIndex+ci,v)));
+      updateSummary();
+    });
+  });
+}
+function setCell(rowIndex,colIndex,value){
+  let rows=[...document.querySelectorAll('#tbody tr')];
+  while(rowIndex>=rows.length){addRows(10);rows=[...document.querySelectorAll('#tbody tr')];}
+  const cells=rows[rowIndex].querySelectorAll('[data-col]');
+  if(colIndex<cells.length)cells[colIndex].value=value;
+}
+function removeBlankRows(){
+  getRows().forEach(r=>{if(Object.entries(r).every(([k,v])=>k==='_tr'||!String(v||'').trim()))r._tr.remove();});
+  [...document.querySelectorAll('#tbody tr')].forEach((tr,i)=>tr.children[0].textContent=i+1);updateSummary();
+}
+function clearAll(){if(!confirm('Clear the batch?'))return;buildGrid(currentFields.filter(f=>!boolish(f.SharedInBatch)));clearStatus();}
+function updateSummary(){const n=activeRows().length;document.getElementById('summary').textContent=`${n} item${n===1?'':'s'} entered`;}
+
+function getSharedValues(){
+  const out={};
+  currentFields.filter(f=>boolish(f.SharedInBatch)).forEach(f=>{
+    const el=document.querySelector(`#sharedFields [data-field="${CSS.escape(f.FieldName)}"]`);
+    out[f.FieldName]=el?String(el.value||'').trim():'';
+  });
+  return out;
+}
+
+function validateRows(){
+  const rows=activeRows(),shared=getSharedValues(),requiredShared=currentFields.filter(f=>boolish(f.SharedInBatch)&&boolish(f.Required));
+  const missingShared=requiredShared.filter(f=>!shared[f.FieldName]).map(f=>f.Label||f.FieldName);
+  let valid=0,invalid=0;
+  const requiredRow=currentFields.filter(f=>!boolish(f.SharedInBatch)&&boolish(f.Required));
+
+  rows.forEach(r=>{
+    let ok=!!r.ItemName;
+    requiredRow.forEach(f=>{if(!r[f.FieldName])ok=false;});
+    r._tr.classList.remove('bad','good');r._tr.classList.add(ok?'good':'bad');
+    ok?valid++:invalid++;
+  });
+
+  if(missingShared.length)showStatus('Missing required shared metadata: '+missingShared.join(', '),'warn');
+  else if(!document.getElementById('location').value)showStatus('Choose a location.','warn');
+  else if(invalid)showStatus(`${valid} valid row(s), ${invalid} invalid row(s). Required fields are highlighted by row.`,'warn');
+  else if(valid)showStatus(`${valid} ${currentType.TypeName} item(s) ready to create.`,'ok');
+  else showStatus('Enter or paste at least one item.','warn');
+
+  return {rows,shared,valid,invalid,missingShared};
+}
+
+async function tableColumns(tableId){const t=await grist.docApi.fetchTable(tableId);return new Set(Object.keys(t));}
+function onlyExisting(fields,cols){const out={};for(const [k,v] of Object.entries(fields)){if(cols.has(k)&&v!==undefined&&v!=='')out[k]=v;}return out;}
+
+async function resolveMetadataTable(){
+  if(!currentType?.MetadataTable)return null;
+  const tables=await grist.docApi.listTables();
+  if(tables.includes(currentType.MetadataTable))return currentType.MetadataTable;
+  const wanted=normName(currentType.MetadataTable);
+  for(const id of tables){const n=normName(id);if(n===wanted||n.startsWith(wanted)||wanted.startsWith(n))return id;}
+  return null;
+}
+
+async function createBatch(){
+  if(busy)return;
+  const check=validateRows();
+  if(!check.valid||check.invalid||check.missingShared.length)return;
+
+  const locationRef=Number(document.getElementById('location').value);
+  const project=document.getElementById('project').value.trim();
+  const metadataDest=await resolveMetadataTable();
+
+  if(currentType.MetadataTable && !metadataDest){
+    showStatus(`Metadata destination table "${currentType.MetadataTable}" was not found.`,'err');return;
+  }
+
+  if(!confirm(`Create ${check.valid} ${currentType.TypeName} item(s)?`))return;
+
+  busy=true;document.getElementById('createBtn').disabled=true;showStatus('Creating batch…','warn');
+
+  try{
+    const invOps=grist.getTable(INVENTORY_TABLE),eventOps=grist.getTable(EVENTS_TABLE);
+    const invCols=await tableColumns(INVENTORY_TABLE),eventCols=await tableColumns(EVENTS_TABLE);
+    const metaOps=metadataDest?grist.getTable(metadataDest):null;
+    const metaCols=metadataDest?await tableColumns(metadataDest):new Set();
+
+    let created=0;const failures=[];
+
+    for(const r of check.rows){
+      try{
+        const invRec=await invOps.create({fields:onlyExisting({
+          ItemName:r.ItemName,
+          ItemType:currentType.TypeName,
+          LocationID:locationRef,
+          Status:'Active',
+          Project:project||undefined
+        },invCols)});
+        const itemRowId=invRec.id;
+
+        if(metaOps){
+          const merged={...check.shared};
+          currentFields.filter(f=>!boolish(f.SharedInBatch)).forEach(f=>merged[f.FieldName]=r[f.FieldName]||'');
+          const metaFields=onlyExisting({
+            Item:itemRowId,
+            Project:project||undefined,
+            ...merged
+          },metaCols);
+          await metaOps.create({fields:metaFields});
+        }
+
+        await eventOps.create({fields:onlyExisting({
+          Item:itemRowId,
+          EventType:'Created',
+          ToLocation:locationRef,
+          Notes:`Created from universal Create Items widget (${currentType.TypeName})`
+        },eventCols)});
+
+        created++;
+      }catch(e){failures.push(`${r.ItemName}: ${e.message||e}`);}
+    }
+
+    if(failures.length)showStatus(`Created ${created} of ${check.rows.length} items.\n\nFailures:\n${failures.join('\n')}`,'warn');
+    else{
+      showStatus(`Success. Created ${created} Inventory item(s), ${metadataDest?created:0} subtype metadata row(s), and ${created} Created event(s).`,'ok');
+      buildGrid(currentFields.filter(f=>!boolish(f.SharedInBatch)));
+    }
+  }catch(e){showStatus('Creation failed: '+(e.message||e),'err');}
+  finally{busy=false;document.getElementById('createBtn').disabled=false;}
+}
+
+document.getElementById('addRows').addEventListener('click',()=>addRows(10));
+document.getElementById('clearBlank').addEventListener('click',removeBlankRows);
+document.getElementById('clearAll').addEventListener('click',clearAll);
+document.getElementById('validateBtn').addEventListener('click',validateRows);
+document.getElementById('createBtn').addEventListener('click',createBatch);
+
+setup();
+</script>
+</body>
+</html>
