@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Batch Create Biological Samples</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:18px;color:#252631;background:#fff}
+h1{font-size:1.35rem;margin:0 0 4px}.sub{color:#6d6f78;font-size:.92rem;margin-bottom:18px}
+.card{border:1px solid #dfe1e6;border-radius:12px;padding:16px;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+label{display:block;font-size:.82rem;font-weight:650;color:#555864;margin:0 0 5px}
+input,select{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #cfd3da;border-radius:7px;background:#fff;font-size:.93rem}
+.table-wrap{overflow:auto;border:1px solid #dfe1e6;border-radius:9px}
+table{border-collapse:collapse;width:100%;min-width:700px}
+th,td{border-bottom:1px solid #e8e9ed;border-right:1px solid #e8e9ed;padding:0}
+th{background:#f6f7f9;padding:9px 8px;text-align:left;font-size:.82rem}
+td:first-child,th:first-child{width:40px;text-align:center;color:#777}
+td input{border:0;border-radius:0;padding:8px}
+td input:focus{outline:2px solid #16b378;outline-offset:-2px}
+.toolbar{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
+button{border:0;border-radius:8px;padding:10px 13px;font-weight:700;cursor:pointer}
+.primary{background:#16b378;color:#fff}.secondary{background:#eef1f4;color:#30343a}.danger{background:#f8eaea;color:#942d2d}
+button:disabled{opacity:.5;cursor:not-allowed}
+.status{padding:11px 12px;border-radius:8px;margin-top:12px;display:none;white-space:pre-wrap}
+.ok{display:block;background:#eaf8f2;color:#136846}.warn{display:block;background:#fff6dc;color:#765600}.err{display:block;background:#fdeeee;color:#962828}
+.summary{font-size:.9rem;color:#565965}.small{font-size:.8rem;color:#777b83}.bad{background:#fff0f0}.good{background:#f0fbf6}
+</style>
+</head>
+<body>
+<h1>Batch Create Biological Samples</h1>
+<div class="sub">Enter shared metadata once, paste rows from Excel, validate, then create the whole batch.</div>
+
+<div class="card">
+  <div class="grid2">
+    <div><label>Location</label><select id="location"></select></div>
+    <div><label>Project (optional)</label><input id="project" placeholder="e.g. HC131"></div>
+    <div><label>Species (shared)</label><input id="species" value="Mouse"></div>
+    <div><label>Collection date (shared)</label><input id="collectionDate" type="date"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="toolbar">
+    <button class="secondary" id="addRows">+ 10 rows</button>
+    <button class="secondary" id="clearBlank">Remove blank rows</button>
+    <button class="danger" id="clearAll">Clear all</button>
+    <span class="small">Tip: copy cells directly from Excel and paste into any grid cell.</span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>ItemName *</th><th>MouseID</th><th>Tissue</th><th>Genotype</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="toolbar">
+    <button class="secondary" id="validateBtn">Validate</button>
+    <span id="summary" class="summary">0 samples entered</span>
+  </div>
+
+  <button class="primary" id="createBtn">CREATE VALID SAMPLES</button>
+  <div id="statusBox" class="status"></div>
+</div>
+
+<script>
+const INVENTORY_TABLE='Inventory';
+const EVENTS_TABLE='Events';
+const BIO_CANDIDATES=['Biological_Samples','BiologicalSamples','Biological_Sample'];
+const LOCATION_CANDIDATES=['Location_Inventory','LocationInventory','Locations'];
+
+let bioTableId=null, locationTableId=null, busy=false;
+
+grist.ready({requiredAccess:'full'});
+
+function showStatus(msg,type='ok'){const el=document.getElementById('statusBox');el.className='status '+type;el.textContent=msg;}
+function clearStatus(){const el=document.getElementById('statusBox');el.className='status';el.textContent='';}
+document.getElementById('collectionDate').value=new Date().toISOString().slice(0,10);
+
+async function findTable(candidates){
+  const tables=await grist.docApi.listTables();
+  return candidates.find(x=>tables.includes(x)) || null;
+}
+function locationLabel(t,i){
+  const lid=t.LocationID?.[i] ?? `Row ${t.id[i]}`;
+  const desc=t.Description?.[i] ?? '';
+  const name=t.Name?.[i] ?? '';
+  return desc ? `${lid} · ${desc}` : (name ? `${lid} · ${name}` : String(lid));
+}
+async function setup(){
+  try{
+    locationTableId=await findTable(LOCATION_CANDIDATES);
+    bioTableId=await findTable(BIO_CANDIDATES);
+    const locSel=document.getElementById('location');
+    locSel.innerHTML='';
+    if(locationTableId){
+      const t=await grist.docApi.fetchTable(locationTableId);
+      t.id.forEach((id,i)=>{
+        const o=document.createElement('option');
+        o.value=String(id); o.textContent=locationLabel(t,i); locSel.appendChild(o);
+      });
+    }else{
+      locSel.innerHTML='<option value="">Location table not found</option>';
+    }
+    if(!bioTableId){
+      showStatus('Setup needed: create a table named Biological_Samples with at least Item (Reference → Inventory), MouseID, Tissue, Genotype, Species, CollectionDate, and Project.','warn');
+    }
+  }catch(e){showStatus('Setup error: '+(e.message||e),'err');}
+}
+
+function rowTemplate(n){
+  return `<tr data-row="${n}">
+    <td>${n+1}</td>
+    <td><input data-col="ItemName"></td>
+    <td><input data-col="MouseID"></td>
+    <td><input data-col="Tissue"></td>
+    <td><input data-col="Genotype"></td>
+  </tr>`;
+}
+function addRows(count=10){
+  const body=document.getElementById('tbody');
+  const start=body.children.length;
+  for(let i=0;i<count;i++) body.insertAdjacentHTML('beforeend',rowTemplate(start+i));
+  attachPasteHandlers(); updateSummary();
+}
+function renumber(){[...document.querySelectorAll('#tbody tr')].forEach((tr,i)=>{tr.dataset.row=i;tr.children[0].textContent=i+1;});}
+function getRows(){
+  return [...document.querySelectorAll('#tbody tr')].map(tr=>{
+    const obj={}; tr.querySelectorAll('input[data-col]').forEach(inp=>obj[inp.dataset.col]=inp.value.trim()); obj._tr=tr; return obj;
+  });
+}
+function setCell(rowIndex,colIndex,value){
+  let rows=[...document.querySelectorAll('#tbody tr')];
+  while(rowIndex>=rows.length){addRows(10);rows=[...document.querySelectorAll('#tbody tr')];}
+  const inputs=rows[rowIndex].querySelectorAll('input[data-col]');
+  if(colIndex<inputs.length) inputs[colIndex].value=value;
+}
+function attachPasteHandlers(){
+  document.querySelectorAll('#tbody input[data-col]').forEach(inp=>{
+    if(inp.dataset.bound==='1') return;
+    inp.dataset.bound='1';
+    inp.addEventListener('paste',e=>{
+      const text=e.clipboardData.getData('text/plain');
+      if(!text.includes('\t') && !text.includes('\n')) return;
+      e.preventDefault();
+      const tr=inp.closest('tr');
+      const rowIndex=[...tr.parentNode.children].indexOf(tr);
+      const inputs=[...tr.querySelectorAll('input[data-col]')];
+      const colIndex=inputs.indexOf(inp);
+      const matrix=text.replace(/\r/g,'').split('\n').filter((x,i,a)=>!(i===a.length-1&&x==='')).map(r=>r.split('\t'));
+      matrix.forEach((r,ri)=>r.forEach((v,ci)=>setCell(rowIndex+ri,colIndex+ci,v)));
+      updateSummary();
+    });
+    inp.addEventListener('input',updateSummary);
+  });
+}
+function activeRows(){return getRows().filter(r=>r.ItemName||r.MouseID||r.Tissue||r.Genotype);}
+function removeBlankRows(){
+  getRows().forEach(r=>{if(!r.ItemName&&!r.MouseID&&!r.Tissue&&!r.Genotype)r._tr.remove();});
+  renumber(); updateSummary();
+}
+function clearAll(){
+  if(!confirm('Clear the entire batch grid?'))return;
+  document.getElementById('tbody').innerHTML=''; addRows(10); clearStatus();
+}
+function validateRows(){
+  const rows=activeRows(); let valid=0,invalid=0; const seen=new Set();
+  rows.forEach(r=>{
+    let ok=!!r.ItemName; const key=r.ItemName.toLowerCase();
+    if(key&&seen.has(key))ok=false; if(key)seen.add(key);
+    r._tr.classList.remove('bad','good');r._tr.classList.add(ok?'good':'bad'); ok?valid++:invalid++;
+  });
+  const loc=document.getElementById('location').value;
+  if(!loc)showStatus('Choose a valid Location before creation.','warn');
+  else if(invalid)showStatus(`${valid} valid row(s), ${invalid} invalid row(s). ItemName is required and names must be unique within this batch.`,'warn');
+  else if(valid)showStatus(`${valid} row(s) ready to create.`,'ok');
+  else showStatus('Paste or enter at least one sample.','warn');
+  return {rows,valid,invalid};
+}
+function updateSummary(){const rows=activeRows();document.getElementById('summary').textContent=`${rows.length} sample${rows.length===1?'':'s'} entered`;}
+async function tableColumns(tableId){const t=await grist.docApi.fetchTable(tableId);return new Set(Object.keys(t));}
+function onlyExisting(fields,cols){const out={};for(const [k,v] of Object.entries(fields)){if(cols.has(k)&&v!==undefined)out[k]=v;}return out;}
+
+async function createBatch(){
+  if(busy)return;
+  clearStatus();
+  const check=validateRows();
+  if(!check.valid||check.invalid){showStatus('Fix validation issues before creating the batch.','warn');return;}
+  const locationRef=Number(document.getElementById('location').value);
+  if(!locationRef){showStatus('Choose a Location.','warn');return;}
+  if(!bioTableId){showStatus('Biological_Samples table is missing. Create it first, then reload this widget.','err');return;}
+
+  const project=document.getElementById('project').value.trim();
+  const species=document.getElementById('species').value.trim();
+  const collectionDate=document.getElementById('collectionDate').value;
+
+  if(!confirm(`Create ${check.valid} Biological Sample record(s)?`))return;
+
+  busy=true; document.getElementById('createBtn').disabled=true; showStatus('Creating batch…','warn');
+
+  try{
+    const invOps=grist.getTable(INVENTORY_TABLE);
+    const bioOps=grist.getTable(bioTableId);
+    const eventOps=grist.getTable(EVENTS_TABLE);
+
+    const [invCols,bioCols,eventCols]=await Promise.all([
+      tableColumns(INVENTORY_TABLE),tableColumns(bioTableId),tableColumns(EVENTS_TABLE)
+    ]);
+
+    let created=0; const failures=[];
+
+    for(const r of check.rows){
+      try{
+        const invFields=onlyExisting({
+          ItemName:r.ItemName,
+          ItemType:'Biological Sample',
+          LocationID:locationRef,
+          Status:'Active',
+          Project:project||undefined
+        },invCols);
+
+        const invRec=await invOps.create({fields:invFields});
+        const itemRowId=invRec.id;
+
+        const bioFields=onlyExisting({
+          Item:itemRowId,
+          MouseID:r.MouseID||undefined,
+          Tissue:r.Tissue||undefined,
+          Genotype:r.Genotype||undefined,
+          Species:species||undefined,
+          CollectionDate:collectionDate||undefined,
+          Project:project||undefined
+        },bioCols);
+
+        await bioOps.create({fields:bioFields});
+
+        const eventFields=onlyExisting({
+          Item:itemRowId,
+          EventType:'Created',
+          ToLocation:locationRef,
+          Notes:'Created from Batch Biological Sample widget'
+        },eventCols);
+
+        await eventOps.create({fields:eventFields});
+        created++;
+      }catch(e){
+        failures.push(`${r.ItemName}: ${e.message||e}`);
+      }
+    }
+
+    if(failures.length){
+      showStatus(`Created ${created} of ${check.rows.length} samples.\n\nFailures:\n${failures.join('\n')}`,'warn');
+    }else{
+      showStatus(`Success. Created ${created} Inventory items, ${created} Biological_Samples rows, and ${created} Created events.`,'ok');
+      document.getElementById('tbody').innerHTML=''; addRows(10);
+    }
+  }catch(e){
+    console.error(e); showStatus('Batch creation failed: '+(e.message||e),'err');
+  }finally{
+    busy=false; document.getElementById('createBtn').disabled=false;
+  }
+}
+
+document.getElementById('addRows').addEventListener('click',()=>addRows(10));
+document.getElementById('clearBlank').addEventListener('click',removeBlankRows);
+document.getElementById('clearAll').addEventListener('click',clearAll);
+document.getElementById('validateBtn').addEventListener('click',validateRows);
+document.getElementById('createBtn').addEventListener('click',createBatch);
+
+addRows(10); setup();
+</script>
+</body>
+</html>
