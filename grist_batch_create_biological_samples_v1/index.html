@@ -79,9 +79,39 @@ function showStatus(msg,type='ok'){const el=document.getElementById('statusBox')
 function clearStatus(){const el=document.getElementById('statusBox');el.className='status';el.textContent='';}
 document.getElementById('collectionDate').value=new Date().toISOString().slice(0,10);
 
-async function findTable(candidates){
+function normName(s){
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g,'');
+}
+
+async function findTable(candidates, requiredColumns=[]){
   const tables=await grist.docApi.listTables();
-  return candidates.find(x=>tables.includes(x)) || null;
+
+  // 1. Exact internal table-ID match.
+  for(const candidate of candidates){
+    if(tables.includes(candidate)) return candidate;
+  }
+
+  // 2. Flexible name match. This handles internal IDs such as
+  // Biological_Samples2 when the visible title is Biological_Samples.
+  const wanted=candidates.map(normName);
+  for(const tableId of tables){
+    const n=normName(tableId);
+    if(wanted.some(w=>n===w || n.startsWith(w) || w.startsWith(n))){
+      return tableId;
+    }
+  }
+
+  // 3. Schema-based fallback. This works even when Grist assigned a
+  // completely different internal table ID from the visible page title.
+  for(const tableId of tables){
+    try{
+      const t=await grist.docApi.fetchTable(tableId);
+      const cols=new Set(Object.keys(t));
+      if(requiredColumns.every(c=>cols.has(c))) return tableId;
+    }catch(e){}
+  }
+
+  return null;
 }
 function locationLabel(t,i){
   const lid=t.LocationID?.[i] ?? `Row ${t.id[i]}`;
@@ -91,8 +121,8 @@ function locationLabel(t,i){
 }
 async function setup(){
   try{
-    locationTableId=await findTable(LOCATION_CANDIDATES);
-    bioTableId=await findTable(BIO_CANDIDATES);
+    locationTableId=await findTable(LOCATION_CANDIDATES,['LocationID']);
+    bioTableId=await findTable(BIO_CANDIDATES,['Item','MouseID','Tissue','Genotype']);
     const locSel=document.getElementById('location');
     locSel.innerHTML='';
     if(locationTableId){
@@ -105,7 +135,14 @@ async function setup(){
       locSel.innerHTML='<option value="">Location table not found</option>';
     }
     if(!bioTableId){
-      showStatus('Setup needed: create a table named Biological_Samples with at least Item (Reference → Inventory), MouseID, Tissue, Genotype, Species, CollectionDate, and Project.','warn');
+      const tables=await grist.docApi.listTables();
+      showStatus(
+        'Biological sample metadata table was not detected. The widget can detect it by name OR by these columns: Item, MouseID, Tissue, Genotype.\n\n'+
+        'Grist internal table IDs visible to the widget:\n'+tables.join(', '),
+        'warn'
+      );
+    }else{
+      clearStatus();
     }
   }catch(e){showStatus('Setup error: '+(e.message||e),'err');}
 }
