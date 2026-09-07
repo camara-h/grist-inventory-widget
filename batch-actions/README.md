@@ -1,21 +1,21 @@
-# Grist Batch Inventory Actions v1
+# Grist Batch Actions v2
 
-Accepts scanner input, Excel paste, or manually typed values.
+Adds `REAGENTS / SAMPLES USED TODAY`.
 
-Resolver searches:
-- all scalar Inventory columns
-- configured subtype metadata fields from ItemTypes + MetadataFields
+After resolving scanned/pasted identifiers, the widget builds one combined ELN-friendly table containing:
+- ItemID
+- ItemName
+- ItemType
+- Status
+- Location
+- the union of configured subtype metadata fields across the selected items
 
-It prefers active records and ranks exact ItemID/barcode, catalog/lot, and ItemName matches.
-Ambiguous matches require explicit user selection.
+Fields that do not apply to an item are left blank.
 
 Actions:
-- Mark Used
-- Discard
-- Aliquot / Dilute
+- COPY TABLE: tab-separated output for direct paste into ELN or Excel
+- DOWNLOAD CSV
 
-Aliquot creates child Inventory items, links ParentItemID, copies configured subtype metadata, creates lifecycle Events, and optionally marks the parent Consumed.
+This export action is read-only. It does not alter status and does not create Events.
 
-Deploy as `batch-actions/index.html` in the existing GitHub Pages repo.
-Use a URL like `...?v=1`.
-Set Full document access.
+Deploy by replacing your existing batch-actions/index.html and use ?v=2 to force refresh.
