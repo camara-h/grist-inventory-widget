@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Batch Inventory Actions</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:18px;color:#252631}
+.card{border:1px solid #dfe1e6;border-radius:12px;padding:16px;margin-bottom:14px}
+textarea{width:100%;min-height:140px;box-sizing:border-box;padding:10px;border:1px solid #cfd3da;border-radius:8px;font-family:monospace}
+button{border:0;border-radius:8px;padding:10px 13px;font-weight:700;cursor:pointer}
+.primary{background:#16b378;color:#fff}.secondary{background:#eef1f4}.danger{background:#c74747;color:#fff}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.status{padding:10px;border-radius:8px;margin-top:12px;display:none;white-space:pre-wrap}
+.ok{display:block;background:#eaf8f2;color:#136846}.warn{display:block;background:#fff6dc;color:#765600}.err{display:block;background:#fdeeee;color:#962828}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+th,td{padding:8px;border-bottom:1px solid #e7e9ed;text-align:left;font-size:.88rem}
+th{background:#f6f7f9}
+select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
+.actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px}
+.panel{display:none;border-top:1px solid #eceef1;margin-top:14px;padding-top:14px}.panel.open{display:block}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.74rem;background:#eef1f4}
+.good{background:#eaf8f2;color:#136846}.amb{background:#fff6dc;color:#765600}.none{background:#fdeeee;color:#962828}
+.small{font-size:.8rem;color:#777}
+@media(max-width:800px){.actions,.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h2>Batch Inventory Actions</h2>
+<div class="small">Scan, paste from Excel, or type identifiers. Resolve matches before changing anything.</div>
+
+<div class="card">
+<label>Scanned / pasted values</label>
+<textarea id="input" placeholder="IT-000251&#10;123456789012&#10;LOT-A32"></textarea>
+<div class="toolbar">
+<button class="secondary" id="resolveBtn">RESOLVE ITEMS</button>
+<button class="secondary" id="clearBtn">CLEAR</button>
+<span id="count" class="small"></span>
+</div>
+<div id="statusBox" class="status"></div>
+</div>
+
+<div class="card" id="resultsCard" style="display:none">
+<b>Resolved items</b>
+<table>
+<thead><tr><th>Input</th><th>Match</th><th>Status</th><th>Resolution</th></tr></thead>
+<tbody id="results"></tbody>
+</table>
+
+<div class="actions">
+<button id="usedBtn" class="primary">MARK USED</button>
+<button id="discardBtn" class="danger">DISCARD</button>
+<button id="aliquotBtn" class="secondary">ALIQUOT / DILUTE</button>
+</div>
+
+<div id="aliquotPanel" class="panel">
+<div class="grid2">
+<div><label>Child aliquots per parent</label><input id="aliquotN" type="number" min="1" value="2"></div>
+<div><label>Parent after operation</label>
+<select id="parentAfter"><option value="keep">Remains Active</option><option value="consumed">Completely Consumed</option></select></div>
+</div>
+<div class="small" style="margin-top:8px">Children inherit ItemType, Location, and configured subtype metadata.</div>
+<button id="confirmAliquot" class="primary" style="margin-top:12px">CREATE ALIQUOTS</button>
+</div>
+</div>
+
+<script>
+const INVENTORY='Inventory', EVENTS='Events';
+const ITEMTYPE_CAND=['ItemTypes','Item_Types'], META_CAND=['MetadataFields','Metadata_Fields'];
+let invTable=null, inventoryRows=[], subtypeIndex=new Map(), itemTypeConfig=[], metadataConfig=[], resolutions=[];
+
+grist.ready({requiredAccess:'full'});
+
+const norm=v=>String(v??'').trim().toLowerCase();
+const normName=v=>norm(v).replace(/[^a-z0-9]/g,'');
+const boolish=v=>v===true||v===1||['true','yes','1'].includes(norm(v));
+function show(m,t='ok'){const e=document.getElementById('statusBox');e.className='status '+t;e.textContent=m}
+function hide(){document.getElementById('statusBox').className='status'}
+function esc(v){return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;')}
+function refNum(v){if(typeof v==='number')return v;if(Array.isArray(v)&&v[0]==='R')return Number(v[1]);const n=Number(v);return Number.isFinite(n)&&n>0?n:null}
+function getCol(t,n,i){return Array.isArray(t[n])?t[n][i]:''}
+
+async function findTable(cands, cols=[]){
+ const tables=await grist.docApi.listTables();
+ for(const c of cands)if(tables.includes(c))return c;
+ for(const id of tables){try{const t=await grist.docApi.fetchTable(id),s=new Set(Object.keys(t));if(cols.every(c=>s.has(c)))return id}catch(e){}}
+ return null;
+}
+
+function primaryLabel(r){return r.ItemID||r.AutoItemID_Test||r.AutoItemID||`row ${r.id}`}
+function itemDisplay(r){return `${primaryLabel(r)} · ${r.ItemName||'Unnamed'}${r.ItemType?` · ${r.ItemType}`:''}`}
+
+async function loadConfigAndSubtype(){
+ subtypeIndex=new Map();
+ const [itId,mfId]=await Promise.all([findTable(ITEMTYPE_CAND,['TypeName','MetadataTable']),findTable(META_CAND,['ItemType','FieldName'])]);
+ if(!itId||!mfId)return;
+ const [it,mf]=await Promise.all([grist.docApi.fetchTable(itId),grist.docApi.fetchTable(mfId)]);
+ itemTypeConfig=it.id.map((id,i)=>({rowId:id,TypeName:getCol(it,'TypeName',i),MetadataTable:getCol(it,'MetadataTable',i),Active:getCol(it,'Active',i)})).filter(x=>x.TypeName&&(x.Active===''||x.Active==null||boolish(x.Active)));
+ metadataConfig=mf.id.map((id,i)=>({rowId:id,ItemType:getCol(mf,'ItemType',i),FieldName:getCol(mf,'FieldName',i),Active:getCol(mf,'Active',i)})).filter(x=>x.FieldName&&(x.Active===''||x.Active==null||boolish(x.Active)));
+ const tables=await grist.docApi.listTables();
+ for(const type of itemTypeConfig){
+   let tableId=type.MetadataTable;
+   if(!tableId)continue;
+   if(!tables.includes(tableId)){const w=normName(tableId);tableId=tables.find(x=>normName(x)===w)||null}
+   if(!tableId)continue;
+   try{
+     const t=await grist.docApi.fetchTable(tableId); if(!Array.isArray(t.Item))continue;
+     const fields=metadataConfig.filter(m=>Number(m.ItemType)===Number(type.rowId)||normName(m.ItemType)===normName(type.TypeName)).map(m=>m.FieldName);
+     for(let i=0;i<t.id.length;i++){
+       const itemRef=refNum(t.Item[i]); if(!itemRef)continue;
+       const arr=subtypeIndex.get(itemRef)||[];
+       for(const f of fields){const v=getCol(t,f,i);if(v!==''&&v!=null)arr.push({field:`${type.TypeName}.${f}`,value:String(v)})}
+       subtypeIndex.set(itemRef,arr);
+     }
+   }catch(e){}
+ }
+}
+
+async function loadInventory(){
+ invTable=await grist.docApi.fetchTable(INVENTORY);
+ inventoryRows=invTable.id.map((id,i)=>{const r={id};for(const [k,col] of Object.entries(invTable))if(k!=='id'&&Array.isArray(col))r[k]=col[i];return r});
+ await loadConfigAndSubtype();
+}
+
+function searchValues(r){
+ const vals=[];
+ for(const [k,v] of Object.entries(r))if(k!=='id'&&v!==''&&v!=null&&(typeof v==='string'||typeof v==='number'||typeof v==='boolean'))vals.push({field:k,value:String(v)});
+ return vals.concat(subtypeIndex.get(Number(r.id))||[]);
+}
+
+function exactMatches(term){
+ const q=norm(term),out=[];
+ for(const r of inventoryRows){
+   let score=0,field='';
+   for(const p of searchValues(r)){
+     if(norm(p.value)===q){
+       const f=normName(p.field); let s=50;
+       if(['itemid','autoitemid','autoitemidtest','barcode','qrcode'].includes(f))s=100;
+       else if(['catalognumber','catalog','lot','lotnumber'].includes(f))s=80;
+       else if(f==='itemname')s=70;
+       if(s>score){score=s;field=p.field}
+     }
+   }
+   if(score){if(norm(r.Status)==='active')score+=10;out.push({row:r,score,field})}
+ }
+ return out.sort((a,b)=>b.score-a.score);
+}
+
+function terms(){return document.getElementById('input').value.replace(/\r/g,'').split(/\n|\t/).map(x=>x.trim()).filter(Boolean)}
+
+function resolveAll(){
+ resolutions=terms().map(term=>{
+   const matches=exactMatches(term); let selected=null;
+   if(matches.length===1)selected=matches[0].row.id;
+   else if(matches.length>1){const active=matches.filter(m=>norm(m.row.Status)==='active');if(active.length===1)selected=active[0].row.id}
+   return {term,matches,selected};
+ });
+ render();
+}
+
+function render(){
+ const tb=document.getElementById('results');tb.innerHTML='';
+ let ok=0,amb=0,none=0;
+ resolutions.forEach((r,i)=>{
+   if(!r.matches.length)none++; else if(r.selected)ok++; else amb++;
+   const options=r.matches.map(m=>`<option value="${m.row.id}" ${Number(r.selected)===Number(m.row.id)?'selected':''}>${esc(itemDisplay(m.row))} [${esc(m.field)}]</option>`).join('');
+   const chosen=r.matches.find(m=>Number(m.row.id)===Number(r.selected))?.row;
+   tb.insertAdjacentHTML('beforeend',`<tr><td>${esc(r.term)}</td><td>${r.matches.length?`<select data-i="${i}"><option value="">Choose…</option>${options}</select>`:'—'}</td><td>${chosen?esc(chosen.Status||''):'—'}</td><td><span class="badge ${!r.matches.length?'none':r.selected?'good':'amb'}">${!r.matches.length?'No match':r.selected?'Resolved':'Choose match'}</span></td></tr>`);
+ });
+ tb.querySelectorAll('select[data-i]').forEach(s=>s.onchange=e=>{resolutions[Number(e.target.dataset.i)].selected=e.target.value?Number(e.target.value):null;render()});
+ document.getElementById('resultsCard').style.display=resolutions.length?'block':'none';
+ document.getElementById('count').textContent=`${resolutions.length} input value(s)`;
+ if(resolutions.length)show(`${ok} resolved, ${amb} ambiguous, ${none} unmatched.`,amb||none?'warn':'ok');
+}
+
+function selectedRows(){return [...new Set(resolutions.map(r=>r.selected).filter(Boolean))].map(id=>inventoryRows.find(r=>Number(r.id)===Number(id))).filter(Boolean)}
+
+async function lifecycle(status,eventType){
+ const rows=selectedRows(); if(!rows.length)return show('No resolved items.','warn');
+ if(resolutions.some(r=>!r.selected))return show('Resolve or remove every ambiguous/unmatched input first.','warn');
+ if(!confirm(`${eventType} ${rows.length} item(s)?`))return;
+ try{
+   const actions=[];
+   for(const r of rows){
+     actions.push(['UpdateRecord',INVENTORY,r.id,{Status:status}]);
+     actions.push(['AddRecord',EVENTS,null,{Item:r.id,EventType:eventType,Notes:`Batch ${eventType} from scanner/paste widget`}]);
+   }
+   await grist.docApi.applyUserActions(actions); await loadInventory(); resolveAll();
+   show(`${rows.length} item(s) updated and ${rows.length} event(s) created.`,'ok');
+ }catch(e){show('Batch action failed: '+(e.message||e),'err')}
+}
+
+function typeCfg(name){return itemTypeConfig.find(x=>normName(x.TypeName)===normName(name))}
+async function metaTable(cfg){
+ if(!cfg?.MetadataTable)return null; const ts=await grist.docApi.listTables();
+ if(ts.includes(cfg.MetadataTable))return cfg.MetadataTable;
+ const w=normName(cfg.MetadataTable); return ts.find(x=>normName(x)===w)||null;
+}
+async function cols(id){const t=await grist.docApi.fetchTable(id);return new Set(Object.keys(t))}
+function existing(f,c){const o={};for(const [k,v] of Object.entries(f))if(c.has(k)&&v!==undefined)o[k]=v;return o}
+
+async function aliquot(){
+ const parents=selectedRows(); if(!parents.length)return show('No resolved parent items.','warn');
+ if(resolutions.some(r=>!r.selected))return show('Resolve or remove every ambiguous/unmatched input first.','warn');
+ const n=Number(document.getElementById('aliquotN').value||0); if(!Number.isInteger(n)||n<1)return show('Aliquot count must be at least 1.','warn');
+ const consume=document.getElementById('parentAfter').value==='consumed';
+ if(!confirm(`Create ${n} child aliquot(s) for each of ${parents.length} parent item(s)?`))return;
+ try{
+   const invOps=grist.getTable(INVENTORY), eventOps=grist.getTable(EVENTS);
+   const invCols=await cols(INVENTORY), eventCols=await cols(EVENTS); let made=0;
+   for(const p of parents){
+     const cfg=typeCfg(p.ItemType), mtId=await metaTable(cfg), mtOps=mtId?grist.getTable(mtId):null, mtCols=mtId?await cols(mtId):new Set();
+     let parentMeta={};
+     if(mtId){
+       const mt=await grist.docApi.fetchTable(mtId);
+       const fs=metadataConfig.filter(m=>Number(m.ItemType)===Number(cfg?.rowId)||normName(m.ItemType)===normName(p.ItemType)).map(m=>m.FieldName);
+       for(let i=0;i<mt.id.length;i++)if(refNum(mt.Item?.[i])===Number(p.id)){for(const f of fs){const v=getCol(mt,f,i);if(v!==undefined&&v!==null)parentMeta[f]=v}break}
+     }
+     for(let i=1;i<=n;i++){
+       const child=await invOps.create({fields:existing({ItemName:`${p.ItemName||primaryLabel(p)} aliquot ${i}`,ItemType:p.ItemType,LocationID:p.LocationID,ParentItemID:p.id,Status:'Active'},invCols)});
+       if(mtOps)await mtOps.create({fields:existing({Item:child.id,...parentMeta},mtCols)});
+       await eventOps.create({fields:existing({Item:child.id,EventType:'Created',Notes:`Aliquot created from ${primaryLabel(p)}`},eventCols)});
+       await eventOps.create({fields:existing({Item:p.id,EventType:'Aliquoted',Notes:`Created child row ${child.id}`},eventCols)});
+       made++;
+     }
+     if(consume)await grist.docApi.applyUserActions([
+       ['UpdateRecord',INVENTORY,p.id,{Status:'Consumed'}],
+       ['AddRecord',EVENTS,null,existing({Item:p.id,EventType:'Consumed',Notes:'Parent consumed during aliquot operation'},eventCols)]
+     ]);
+   }
+   document.getElementById('aliquotPanel').classList.remove('open'); await loadInventory(); resolveAll(); show(`Created ${made} child aliquot(s).`,'ok');
+ }catch(e){show('Aliquot operation failed: '+(e.message||e),'err')}
+}
+
+document.getElementById('resolveBtn').onclick=resolveAll;
+document.getElementById('clearBtn').onclick=()=>{document.getElementById('input').value='';resolutions=[];render();hide()};
+document.getElementById('usedBtn').onclick=()=>lifecycle('Used','Used');
+document.getElementById('discardBtn').onclick=()=>lifecycle('Discarded','Discarded');
+document.getElementById('aliquotBtn').onclick=()=>document.getElementById('aliquotPanel').classList.toggle('open');
+document.getElementById('confirmAliquot').onclick=aliquot;
+document.getElementById('input').oninput=()=>document.getElementById('count').textContent=`${terms().length} input value(s)`;
+
+(async()=>{try{show('Loading inventory and subtype metadata…','warn');await loadInventory();hide()}catch(e){show('Setup error: '+(e.message||e),'err')}})();
+</script>
+</body></html>
