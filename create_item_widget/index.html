@@ -43,7 +43,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
     </div>
     <div>
       <label>Location</label>
-      <select id="location"></select>
+      <input id="locationSearch" placeholder="Search box, shelf, freezer, room...">
+      <select id="location" style="margin-top:6px"></select>
     </div>
     <div>
       <label>Project (optional)</label>
@@ -94,7 +95,7 @@ const ITEMTYPE_CANDIDATES=['ItemTypes','Item_Types'];
 const METADATA_CANDIDATES=['MetadataFields','Metadata_Fields'];
 
 let itemTypesTableId=null, metadataTableId=null, locationTableId=null;
-let itemTypes=[], metadataFields=[], currentType=null, currentFields=[];
+let itemTypes=[], metadataFields=[], currentType=null, currentFields=[], locationRows=[];
 let busy=false;
 
 grist.ready({requiredAccess:'full'});
@@ -186,11 +187,9 @@ async function setup(){
       grist.docApi.fetchTable(metadataTableId)
     ]);
 
-    const locSel=document.getElementById('location');
-    locSel.innerHTML='';
-    locT.id.forEach((id,i)=>{
-      const o=document.createElement('option');o.value=String(id);o.textContent=locationLabel(locT,i);locSel.appendChild(o);
-    });
+    locationRows=locT.id.map((id,i)=>({id,label:locationLabel(locT,i)}));
+    refreshLocations();
+    document.getElementById('locationSearch').addEventListener('input',refreshLocations);
 
     itemTypes=typeT.id.map((id,i)=>({
       rowId:id,
@@ -241,6 +240,21 @@ function sameItemType(fieldItemType, typeObj){
 
   // Also support plain-text configuration for flexibility.
   return normName(fieldItemType) === normName(typeObj.TypeName);
+}
+
+function refreshLocations(){
+  const q=String(document.getElementById('locationSearch')?.value||'').toLowerCase().trim();
+  const sel=document.getElementById('location');
+  if(!sel)return;
+  const previous=sel.value;
+  const filtered=locationRows.filter(r=>!q || r.label.toLowerCase().includes(q));
+  sel.innerHTML='';
+  for(const r of filtered){
+    const o=document.createElement('option');
+    o.value=String(r.id);o.textContent=r.label;
+    if(String(r.id)===String(previous))o.selected=true;
+    sel.appendChild(o);
+  }
 }
 
 function onTypeChange(){
