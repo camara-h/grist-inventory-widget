@@ -29,7 +29,7 @@ select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
 </head>
 <body>
 <h2>Batch Inventory Actions</h2>
-<div class="small">Scan, paste from Excel, or type identifiers. Resolve matches before changing anything.</div>
+<div class="small">Scan, paste from Excel, or type IDs, names, catalogue numbers, lots, or partial search terms. Resolve matches before changing anything.</div>
 
 <div class="card">
 <label>Scanned / pasted values</label>
@@ -127,8 +127,24 @@ async function loadConfigAndSubtype(){
 
      // The subtype -> Inventory reference was originally called Item.
      // In the current document it is called ItemID. Support both.
-     const linkCol = Array.isArray(t.Item) ? 'Item' :
-                     Array.isArray(t.ItemID) ? 'ItemID' : null;
+     // Find the subtype -> Inventory reference column.
+     // Current schema uses ItemName as Reference -> Inventory, while ItemID is
+     // merely a formula such as $ItemName.ItemID. Support the common variants.
+     const linkCandidates=['Item','ItemName','InventoryItem','Inventory','ItemID'];
+     let linkCol=null;
+
+     for(const c of linkCandidates){
+       if(!Array.isArray(t[c]))continue;
+
+       // A true Grist Reference arrives as numeric row IDs (or ref-shaped values).
+       // Prefer columns that actually contain resolvable Inventory row references.
+       const sample=t[c].find(v=>v!==null && v!=='' && v!==undefined);
+       if(sample!==undefined && refNum(sample)){
+         linkCol=c;
+         break;
+       }
+     }
+
      if(!linkCol)continue;
 
      // MetadataFields.ItemType is commonly a Grist Reference, so compare its
@@ -188,21 +204,79 @@ function searchValues(r){
 }
 
 function exactMatches(term){
- const q=norm(term),out=[];
+ const q=norm(term);
+ if(!q)return [];
+
+ const out=[];
+
  for(const r of inventoryRows){
-   let score=0,field='';
+   let bestScore=0;
+   let bestField='';
+   let bestValue='';
+
    for(const p of searchValues(r)){
-     if(norm(p.value)===q){
-       const f=normName(p.field); let s=50;
-       if(['itemid','autoitemid','autoitemidtest','barcode','qrcode'].includes(f))s=100;
-       else if(['catalognumber','catalog','lot','lotnumber'].includes(f))s=80;
-       else if(f==='itemname')s=70;
-       if(s>score){score=s;field=p.field}
+     const valueNorm=norm(p.value);
+     if(!valueNorm)continue;
+
+     const fieldNorm=normName(p.field);
+     let score=0;
+
+     // Exact matches remain the strongest, especially machine identifiers.
+     if(valueNorm===q){
+       score=100;
+
+       if(['itemid','autoitemid','autoitemidtest','barcode','qrcode','qr'].includes(fieldNorm)){
+         score=200;
+       }else if(
+         fieldNorm.includes('catalog') ||
+         fieldNorm.includes('catalogue') ||
+         fieldNorm.includes('lot')
+       ){
+         score=170;
+       }else if(fieldNorm==='itemname'){
+         score=150;
+       }
+     }
+     // Human search. "mito" should find "MitoTracker Red FM".
+     else if(q.length>=2 && valueNorm.includes(q)){
+       score=60;
+
+       if(fieldNorm==='itemname')score=110;
+       else if(
+         fieldNorm.includes('catalog') ||
+         fieldNorm.includes('catalogue') ||
+         fieldNorm.includes('lot') ||
+         fieldNorm.includes('vendor')
+       )score=90;
+
+       // Prefix matches are a little stronger than arbitrary contains.
+       if(valueNorm.startsWith(q))score+=10;
+     }
+
+     if(score>bestScore){
+       bestScore=score;
+       bestField=p.field;
+       bestValue=p.value;
      }
    }
-   if(score){if(norm(r.Status)==='active')score+=10;out.push({row:r,score,field})}
+
+   if(bestScore){
+     // Prefer active physical items when otherwise comparable.
+     if(norm(r.Status)==='active')bestScore+=8;
+
+     out.push({
+       row:r,
+       score:bestScore,
+       field:bestField,
+       matchedValue:bestValue
+     });
+   }
  }
- return out.sort((a,b)=>b.score-a.score);
+
+ return out.sort((a,b)=>{
+   if(b.score!==a.score)return b.score-a.score;
+   return String(primaryLabel(a.row)).localeCompare(String(primaryLabel(b.row)));
+ });
 }
 
 function terms(){return document.getElementById('input').value.replace(/\r/g,'').split(/\n|\t/).map(x=>x.trim()).filter(Boolean)}
@@ -210,8 +284,13 @@ function terms(){return document.getElementById('input').value.replace(/\r/g,'')
 function resolveAll(){
  resolutions=terms().map(term=>{
    const matches=exactMatches(term); let selected=null;
-   if(matches.length===1)selected=matches[0].row.id;
-   else if(matches.length>1){const active=matches.filter(m=>norm(m.row.Status)==='active');if(active.length===1)selected=active[0].row.id}
+   if(matches.length===1){
+     selected=matches[0].row.id;
+   }else if(matches.length>1){
+     // Auto-select only when one result is clearly an exact/high-confidence match.
+     const high=matches.filter(m=>m.score>=150);
+     if(high.length===1)selected=high[0].row.id;
+   }
    return {term,matches,selected};
  });
  render();
@@ -222,7 +301,7 @@ function render(){
  let ok=0,amb=0,none=0;
  resolutions.forEach((r,i)=>{
    if(!r.matches.length)none++; else if(r.selected)ok++; else amb++;
-   const options=r.matches.map(m=>`<option value="${m.row.id}" ${Number(r.selected)===Number(m.row.id)?'selected':''}>${esc(itemDisplay(m.row))} [${esc(m.field)}]</option>`).join('');
+   const options=r.matches.map(m=>`<option value="${m.row.id}" ${Number(r.selected)===Number(m.row.id)?'selected':''}>${esc(itemDisplay(m.row))} [${esc(m.field)}: ${esc(m.matchedValue||'')}]</option>`).join('');
    const chosen=r.matches.find(m=>Number(m.row.id)===Number(r.selected))?.row;
    tb.insertAdjacentHTML('beforeend',`<tr><td>${esc(r.term)}</td><td>${r.matches.length?`<select data-i="${i}"><option value="">Choose…</option>${options}</select>`:'—'}</td><td>${chosen?esc(chosen.Status||''):'—'}</td><td><span class="badge ${!r.matches.length?'none':r.selected?'good':'amb'}">${!r.matches.length?'No match':r.selected?'Resolved':'Choose match'}</span></td></tr>`);
  });
