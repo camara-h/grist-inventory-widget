@@ -111,16 +111,17 @@ function itemDisplay(r){return `${primaryLabel(r)} · ${r.ItemName||'Unnamed'}${
 async function loadConfigAndSubtype(){
  subtypeIndex=new Map();
  subtypeData=new Map();
+ subtypeData=new Map();
  const [itId,mfId]=await Promise.all([findTable(ITEMTYPE_CAND,['TypeName','MetadataTable']),findTable(META_CAND,['ItemType','FieldName'])]);
  if(!itId||!mfId)return;
  const [it,mf]=await Promise.all([grist.docApi.fetchTable(itId),grist.docApi.fetchTable(mfId)]);
  itemTypeConfig=it.id.map((id,i)=>({rowId:id,TypeName:getCol(it,'TypeName',i),MetadataTable:getCol(it,'MetadataTable',i),Active:getCol(it,'Active',i)})).filter(x=>x.TypeName&&(x.Active===''||x.Active==null||boolish(x.Active)));
- metadataConfig=mf.id.map((id,i)=>({rowId:id,ItemType:getCol(mf,'ItemType',i),FieldName:getCol(mf,'FieldName',i),Active:getCol(mf,'Active',i)})).filter(x=>x.FieldName&&(x.Active===''||x.Active==null||boolish(x.Active)));
+ metadataConfig=mf.id.map((id,i)=>({rowId:id,ItemType:getCol(mf,'ItemType',i),FieldName:getCol(mf,'FieldName',i),Label:getCol(mf,'Label',i)||getCol(mf,'FieldName',i),Active:getCol(mf,'Active',i)})).filter(x=>x.FieldName&&(x.Active===''||x.Active==null||boolish(x.Active)));
  const tables=await grist.docApi.listTables();
  for(const type of itemTypeConfig){
    let tableId=type.MetadataTable;
    if(!tableId)continue;
-   if(!tables.includes(tableId)){const w=normName(tableId);tableId=tables.find(x=>normName(x)===w)||null}
+   if(!tables.includes(tableId)){const w=normName(tableId);tableId=tables.find(x=>{const n=normName(x);return n===w||n.startsWith(w)||w.startsWith(n)})||null}
    if(!tableId)continue;
    try{
      const t=await grist.docApi.fetchTable(tableId); if(!Array.isArray(t.Item))continue;
