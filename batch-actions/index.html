@@ -111,7 +111,6 @@ function itemDisplay(r){return `${primaryLabel(r)} · ${r.ItemName||'Unnamed'}${
 async function loadConfigAndSubtype(){
  subtypeIndex=new Map();
  subtypeData=new Map();
- subtypeData=new Map();
  const [itId,mfId]=await Promise.all([findTable(ITEMTYPE_CAND,['TypeName','MetadataTable']),findTable(META_CAND,['ItemType','FieldName'])]);
  if(!itId||!mfId)return;
  const [it,mf]=await Promise.all([grist.docApi.fetchTable(itId),grist.docApi.fetchTable(mfId)]);
@@ -124,19 +123,51 @@ async function loadConfigAndSubtype(){
    if(!tables.includes(tableId)){const w=normName(tableId);tableId=tables.find(x=>{const n=normName(x);return n===w||n.startsWith(w)||w.startsWith(n)})||null}
    if(!tableId)continue;
    try{
-     const t=await grist.docApi.fetchTable(tableId); if(!Array.isArray(t.Item))continue;
-     const fields=metadataConfig.filter(m=>Number(m.ItemType)===Number(type.rowId)||normName(m.ItemType)===normName(type.TypeName)).map(m=>m.FieldName);
+     const t=await grist.docApi.fetchTable(tableId);
+
+     // The subtype -> Inventory reference was originally called Item.
+     // In the current document it is called ItemID. Support both.
+     const linkCol = Array.isArray(t.Item) ? 'Item' :
+                     Array.isArray(t.ItemID) ? 'ItemID' : null;
+     if(!linkCol)continue;
+
+     // MetadataFields.ItemType is commonly a Grist Reference, so compare its
+     // underlying row id as well as its displayed/type text.
+     const cfgFields=metadataConfig.filter(m=>{
+       const mtRef=refNum(m.ItemType);
+       return (mtRef && Number(mtRef)===Number(type.rowId)) ||
+              normName(m.ItemType)===normName(type.TypeName);
+     });
+
+     const actualCols=Object.keys(t);
+
      for(let i=0;i<t.id.length;i++){
-       const itemRef=refNum(t.Item[i]); if(!itemRef)continue;
+       const itemRef=refNum(t[linkCol][i]);
+       if(!itemRef)continue;
+
        const arr=subtypeIndex.get(itemRef)||[];
        const meta=subtypeData.get(itemRef)||{};
-       for(const f of fields){
-         const v=getCol(t,f,i);
+
+       for(const cfg of cfgFields){
+         let actual=cfg.FieldName;
+
+         // Be tolerant of spaces/underscores/case differences.
+         if(!actualCols.includes(actual)){
+           const wanted=normName(cfg.FieldName);
+           actual=actualCols.find(c=>normName(c)===wanted)||null;
+         }
+         if(!actual)continue;
+
+         const v=getCol(t,actual,i);
          if(v!==''&&v!=null){
-           arr.push({field:`${type.TypeName}.${f}`,value:String(v)});
-           meta[f]=v;
+           arr.push({
+             field:`${type.TypeName}.${cfg.FieldName}`,
+             value:String(v)
+           });
+           meta[cfg.Label||cfg.FieldName]=v;
          }
        }
+
        subtypeIndex.set(itemRef,arr);
        subtypeData.set(itemRef,meta);
      }
