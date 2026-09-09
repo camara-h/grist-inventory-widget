@@ -66,7 +66,7 @@ button.ctrl:disabled{opacity:.45;cursor:not-allowed}
 <div class="topbar">
   <div>
     <h2>Location Map</h2>
-    <div class="sub">Click through the hierarchy. Rooms → Freezers/Fridges → Shelves → Racks/Boxes.</div>
+    <div class="sub">Click through the hierarchy. Selecting a real location also moves the Grist cursor and updates linked widgets.</div>
   </div>
   <div class="controls">
     <button class="ctrl" id="rootBtn">ROOT</button>
@@ -92,7 +92,7 @@ let byId=new Map();
 let currentId=null;
 let selectedFromGrist=null;
 
-grist.ready({requiredAccess:'read table'});
+grist.ready({requiredAccess:'read table', allowSelectBy:true});
 
 function normName(v){
   return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
@@ -176,6 +176,15 @@ function ancestors(id){
   return chain.reverse();
 }
 
+async function syncCursor(rowId){
+  if(rowId==null)return;
+  try{
+    await grist.setCursorPos({rowId:Number(rowId)});
+  }catch(e){
+    console.warn('Could not synchronize Grist cursor',e);
+  }
+}
+
 function renderBreadcrumbs(){
   const el=document.getElementById('breadcrumbs');
   const chain=ancestors(currentId);
@@ -185,9 +194,15 @@ function renderBreadcrumbs(){
   }
   el.innerHTML=html;
   el.querySelectorAll('.crumb').forEach(btn=>{
-    btn.onclick=()=>{
-      currentId=btn.dataset.id==='root'?null:Number(btn.dataset.id);
+    btn.onclick=async()=>{
+      if(btn.dataset.id==='root'){
+        currentId=null;
+        render();
+        return;
+      }
+      currentId=Number(btn.dataset.id);
       render();
+      await syncCursor(currentId);
     };
   });
 }
@@ -196,7 +211,10 @@ function renderHeader(){
   const el=document.getElementById('currentHeader');
   if(currentId==null){
     el.innerHTML=`<div class="current">
-      <div><div class="current-name">Top-level locations</div><div class="current-meta">Rooms and any other root locations</div></div>
+      <div>
+        <div class="current-name">Top-level locations</div>
+        <div class="current-meta">Rooms and any other root locations.<br><b>Navigation only:</b> click a real location before using Location Manager actions.</div>
+      </div>
     </div>`;
     return;
   }
@@ -238,9 +256,10 @@ function renderGrid(){
   }).join('');
 
   grid.querySelectorAll('.tile').forEach(tile=>{
-    tile.onclick=()=>{
+    tile.onclick=async()=>{
       currentId=Number(tile.dataset.id);
       render();
+      await syncCursor(currentId);
     };
   });
 }
@@ -279,11 +298,12 @@ async function load(){
 }
 
 document.getElementById('rootBtn').onclick=()=>{currentId=null;render()};
-document.getElementById('upBtn').onclick=()=>{
+document.getElementById('upBtn').onclick=async()=>{
   if(currentId==null)return;
   const r=byId.get(Number(currentId));
   currentId=r?.parentId || null;
   render();
+  if(currentId!=null)await syncCursor(currentId);
 };
 
 grist.onRecord(record=>{

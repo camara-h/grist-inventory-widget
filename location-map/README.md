@@ -1,52 +1,16 @@
-# Grist Location Visual Mapper v1
+# Grist Location Visual Mapper v2
 
-A read-only visual navigator for the Location Inventory hierarchy.
+Adds two-way synchronization.
 
-## What it does
-- Starts at root locations such as Rooms.
-- Displays direct child locations as a responsive grid of clickable cards.
-- Clicking a card navigates down one level.
-- Breadcrumbs let you jump back to any ancestor.
-- Root and Up One Level buttons are included.
-- If the widget is linked to a Location Inventory widget using Select By, selecting a location in Grist opens that location in the mapper.
-- If a `Position` column exists, children are ordered by numeric Position. Otherwise they are ordered by Type, Name, then LocationID.
+Previously:
+- Location Inventory cursor -> map
 
-## Expected Location table
-Required:
-- LocationID
-- ParentLocationID (Reference -> Location table)
-- Type
+Now:
+- Location Inventory cursor -> map
+- map tile click -> Grist cursor
+- breadcrumb location click -> Grist cursor
+- Up One Level -> Grist cursor when destination is a real location
 
-Recommended:
-- Name
-- Description
+Root is only a navigation state, not a real Location record, so it cannot become the Grist cursor. At Root, click a real location before using Location Manager actions.
 
-Optional:
-- Position
-
-## Grist setup
-
-Add a Custom Widget to your Location Browser page.
-Use the URL for this widget.
-It only needs read-table access, but Grist may offer broader access choices.
-
-Optionally set `Select By` to your Location Inventory table/card widget. That makes the map jump to whatever location you select in Grist.
-
-## Deployment
-
-Place:
-`location-map/index.html`
-
-in your existing GitHub Pages repository.
-
-Then use something like:
-`https://YOURNAME.github.io/YOUR-REPO/location-map/?v=1`
-
-## Future extension
-
-A later version can render true fixed-position matrices for freezers/racks if you add fields such as:
-- Position
-- Rows
-- Columns
-
-It can then support empty slots and eventually drag-and-drop placement/swap behavior.
+Deploy over the current location-map widget and use `?v=2`.
