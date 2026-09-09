@@ -61,7 +61,7 @@ select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
 
 <div id="exportPanel" class="panel">
 <div><b>Metadata table for ELN</b></div>
-<div class="small" style="margin:6px 0 10px">Core Inventory fields plus the union of configured subtype metadata fields.</div>
+<div class="small" style="margin:6px 0 10px">Core Inventory fields plus the union of configured subtype metadata fields. Location references are dereferenced to both LocationID and full path.</div>
 <div style="overflow:auto">
 <table><thead id="exportHead"></thead><tbody id="exportBody"></tbody></table>
 </div>
@@ -85,7 +85,8 @@ select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
 <script>
 const INVENTORY='Inventory', EVENTS='Events';
 const ITEMTYPE_CAND=['ItemTypes','Item_Types'], META_CAND=['MetadataFields','Metadata_Fields'];
-let invTable=null, inventoryRows=[], subtypeIndex=new Map(), subtypeData=new Map(), itemTypeConfig=[], metadataConfig=[], resolutions=[], lastExport=null;
+const LOCATION_CAND=['Location_Inventory','LocationInventory','Locations'];
+let invTable=null, inventoryRows=[], subtypeIndex=new Map(), subtypeData=new Map(), itemTypeConfig=[], metadataConfig=[], resolutions=[], lastExport=null, locationTableId=null, locationById=new Map();
 
 grist.ready({requiredAccess:'full'});
 
@@ -97,6 +98,34 @@ function hide(){document.getElementById('statusBox').className='status'}
 function esc(v){return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;')}
 function refNum(v){if(typeof v==='number')return v;if(Array.isArray(v)&&v[0]==='R')return Number(v[1]);const n=Number(v);return Number.isFinite(n)&&n>0?n:null}
 function getCol(t,n,i){return Array.isArray(t[n])?t[n][i]:''}
+
+async function loadLocations(){
+ locationById=new Map();
+ locationTableId=await findTable(LOCATION_CAND,['LocationID']);
+ if(!locationTableId)return;
+ const t=await grist.docApi.fetchTable(locationTableId);
+ for(let i=0;i<t.id.length;i++){
+   locationById.set(Number(t.id[i]),{
+     rowId:Number(t.id[i]),
+     LocationID:getCol(t,'LocationID',i)||'',
+     Description:getCol(t,'Description',i)||'',
+     Name:getCol(t,'Name',i)||'',
+     Type:getCol(t,'Type',i)||''
+   });
+ }
+}
+
+function locationInfoFromRef(v){
+ const id=refNum(v);
+ if(!id)return {id:'',path:'',name:''};
+ const loc=locationById.get(Number(id));
+ if(!loc)return {id:String(id),path:String(id),name:String(id)};
+ return {
+   id:loc.LocationID||String(id),
+   path:loc.Description||loc.Name||loc.LocationID||String(id),
+   name:loc.Name||loc.LocationID||String(id)
+ };
+}
 
 async function findTable(cands, cols=[]){
  const tables=await grist.docApi.listTables();
@@ -194,12 +223,21 @@ async function loadConfigAndSubtype(){
 async function loadInventory(){
  invTable=await grist.docApi.fetchTable(INVENTORY);
  inventoryRows=invTable.id.map((id,i)=>{const r={id};for(const [k,col] of Object.entries(invTable))if(k!=='id'&&Array.isArray(col))r[k]=col[i];return r});
- await loadConfigAndSubtype();
+ await Promise.all([loadConfigAndSubtype(),loadLocations()]);
 }
 
 function searchValues(r){
  const vals=[];
- for(const [k,v] of Object.entries(r))if(k!=='id'&&v!==''&&v!=null&&(typeof v==='string'||typeof v==='number'||typeof v==='boolean'))vals.push({field:k,value:String(v)});
+ for(const [k,v] of Object.entries(r)){
+   if(k==='id'||v===''||v==null)continue;
+   if(k==='LocationID'){
+     const loc=locationInfoFromRef(v);
+     if(loc.id)vals.push({field:'LocationID',value:String(loc.id)});
+     if(loc.path)vals.push({field:'Location',value:String(loc.path)});
+     continue;
+   }
+   if(typeof v==='string'||typeof v==='number'||typeof v==='boolean')vals.push({field:k,value:String(v)});
+ }
  return vals.concat(subtypeIndex.get(Number(r.id))||[]);
 }
 
@@ -379,7 +417,7 @@ function csvEscape(v){
 function getExportRows(){
  const rows=selectedRows();
  if(!rows.length)return {columns:[],rows:[]};
- const core=['ItemID','ItemName','ItemType','Status','Location'];
+ const core=['ItemID','ItemName','ItemType','Status','LocationID','Location'];
  const keys=new Set();
  for(const r of rows){
    const meta=subtypeData.get(Number(r.id))||{};
@@ -389,7 +427,8 @@ function getExportRows(){
  const columns=[...core,...metaCols];
  const out=rows.map(r=>{
    const meta=subtypeData.get(Number(r.id))||{};
-   const row={ItemID:primaryLabel(r),ItemName:r.ItemName||'',ItemType:r.ItemType||'',Status:r.Status||'',Location:r.LocationID||''};
+   const loc=locationInfoFromRef(r.LocationID);
+   const row={ItemID:primaryLabel(r),ItemName:r.ItemName||'',ItemType:r.ItemType||'',Status:r.Status||'',LocationID:loc.id,Location:loc.path};
    for(const k of metaCols)row[k]=meta[k]??'';
    return row;
  });
