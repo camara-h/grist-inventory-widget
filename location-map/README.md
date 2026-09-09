@@ -1,16 +1,17 @@
-# Grist Location Visual Mapper v2
+# Location Map v3
 
-Adds two-way synchronization.
+Requires `Location Inventory.Position` as a numeric/integer data column.
 
-Previously:
-- Location Inventory cursor -> map
+Uses parent's existing `Rows` and `Columns` when present. Otherwise uses 7 columns and grows rows automatically.
 
-Now:
-- Location Inventory cursor -> map
-- map tile click -> Grist cursor
-- breadcrumb location click -> Grist cursor
-- Up One Level -> Grist cursor when destination is a real location
+Drag child to:
+- empty slot = move
+- occupied slot = swap
 
-Root is only a navigation state, not a real Location record, so it cannot become the Grist cursor. At Root, click a real location before using Location Manager actions.
+IMPORTANT page linking:
+- Map must be the linking source.
+- Set Location Inventory table -> Select By -> Location Map.
+- Set Location Manager -> Select By -> Location Map.
+- Do NOT set Location Map -> Select By -> Location Inventory.
 
-Deploy over the current location-map widget and use `?v=2`.
+Deploy with ?v=3.
