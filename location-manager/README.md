@@ -1,9 +1,9 @@
-# Location Manager v3
+# Location Manager v4
 
-Requires Location Inventory.Position numeric/integer data column.
-
-When creating a child:
-- optional Position may be supplied
-- blank Position gets first available positive slot
-
-Deploy with ?v=3.
+Changes from v3:
+- Rack now uses `Rows` + `Columns`, like Box.
+- Rack no longer has `NumberOfShelves`.
+- Creating a Rack no longer creates Shelf records.
+- Shelf was removed as a child-type option under Rack.
+- Freezer, Fridge, and Cabinet may still create shelves.
+- Box and Rack both support positional grids used by the Storage Map.
