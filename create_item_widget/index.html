@@ -187,7 +187,7 @@ async function setup(){
       grist.docApi.fetchTable(metadataTableId)
     ]);
 
-    locationRows=locT.id.map((id,i)=>({id,label:locationLabel(locT,i)}));
+    locationRows=locT.id.map((id,i)=>({id,locationId:locT.LocationID?.[i] ?? '',label:locationLabel(locT,i)}));
     refreshLocations();
     document.getElementById('locationSearch').addEventListener('input',refreshLocations);
 
@@ -247,6 +247,7 @@ function refreshLocations(){
   const sel=document.getElementById('location');
   if(!sel)return;
   const previous=sel.value;
+  const DEFAULT_LOCATION_ID='RM0152';
   const filtered=locationRows.filter(r=>!q || r.label.toLowerCase().includes(q));
   sel.innerHTML='';
   for(const r of filtered){
@@ -254,6 +255,14 @@ function refreshLocations(){
     o.value=String(r.id);o.textContent=r.label;
     if(String(r.id)===String(previous))o.selected=true;
     sel.appendChild(o);
+  }
+
+  // On first load, default new items to the Unassigned Room.
+  if(!previous && !q){
+    const def=locationRows.find(r=>String(r.locationId).trim()===DEFAULT_LOCATION_ID);
+    if(def && [...sel.options].some(o=>o.value===String(def.id))){
+      sel.value=String(def.id);
+    }
   }
 }
 
