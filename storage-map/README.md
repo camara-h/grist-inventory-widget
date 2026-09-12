@@ -1,21 +1,16 @@
-# Unified Storage Map v1
+# Unified Storage Map v2
 
-Shows Location Inventory and active Inventory items in one map.
+New:
+- Empty slots are clickable.
+- Add Existing Item or Add Existing Location into a selected position.
+- Search results dropdown for the main map search. Arrow keys + Enter supported.
+- Existing-item search includes Inventory fields and detected subtype metadata.
+- Existing-location search includes all scalar Location fields.
+- Item relocation updates LocationID + Position and writes a Relocated event when compatible Event columns exist.
+- Location relocation updates ParentLocationID + Position and writes a Location Relocated event when the Events table has a Location-compatible column.
+- Invalid/colliding/out-of-range stored positions are highlighted red.
 
-Required/recommended schema:
-Location Inventory: LocationID, ParentLocationID, Type, Name, Description, Rows, Columns, Position
-Inventory: ItemID, ItemName, ItemType, Status, LocationID (Reference -> Location Inventory), ParentItemID, Position
-
-Behavior:
-- current location shows child locations + active Inventory items
-- both share the same Position slots
-- Rows/Columns define a fixed grid
-- otherwise 7 columns, auto-growing
-- drag to empty = reposition
-- drag onto another non-location object = swap
-- drag Inventory item onto a child location or breadcrumb = move item into that location at first free position
-- location hierarchy relocation remains in Location Manager
-
-Search covers locations plus scalar Inventory fields and highlights ancestor branches.
-
-Deploy as storage-map/index.html with Full document access.
+Expected writable columns:
+Location Inventory: ParentLocationID, Position, Rows, Columns
+Inventory: LocationID, Position, Status
+Events: widget uses whichever of Item, Location, EventType, Notes actually exist.
