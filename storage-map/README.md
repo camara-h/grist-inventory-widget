@@ -1,15 +1,16 @@
-# Unified Storage Map v3
+# Unified Storage Map v2
 
-Changes from v2:
-- If Location Inventory has an `Active` toggle, only Active locations are displayed.
-- Main location search only returns Active locations.
-- Add Existing Location only returns Active locations.
-- Inventory remains limited to `Status = Active`.
-- Item/location relocation refuses inactive destination locations.
-- Search suggestions navigate only when clicked or selected with Enter.
-- Clicking outside the search dropdown closes only the dropdown. Search text and map highlighting remain active.
-- Focusing the search box again reopens the suggestions while the query remains.
-- If the currently displayed location becomes inactive, the map falls back to an active ancestor or Root.
+New:
+- Empty slots are clickable.
+- Add Existing Item or Add Existing Location into a selected position.
+- Search results dropdown for the main map search. Arrow keys + Enter supported.
+- Existing-item search includes Inventory fields and detected subtype metadata.
+- Existing-location search includes all scalar Location fields.
+- Item relocation updates LocationID + Position and writes a Relocated event when compatible Event columns exist.
+- Location relocation updates ParentLocationID + Position and writes a Location Relocated event when the Events table has a Location-compatible column.
+- Invalid/colliding/out-of-range stored positions are highlighted red.
 
-`Active` is treated as active for boolean true / 1 / "true" / "yes".
-If there is no Active column, locations remain backward-compatible and are all considered active.
+Expected writable columns:
+Location Inventory: ParentLocationID, Position, Rows, Columns
+Inventory: LocationID, Position, Status
+Events: widget uses whichever of Item, Location, EventType, Notes actually exist.
