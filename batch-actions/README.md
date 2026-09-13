@@ -1,15 +1,21 @@
-# Grist Batch Actions v3.3
+# Batch Actions v3.4
 
-Adds reference-aware Location export.
+Fix for mixed ItemType metadata export ("Reagents / Samples Used Today").
 
-Inventory.LocationID is a Reference -> Location Inventory, so Grist stores a numeric row id underneath.
+Changes:
+- Subtype -> Inventory link detection now scans every subtype-table column and
+  chooses the column whose values actually resolve to Inventory row IDs.
+  It no longer relies only on Item / ItemName / ItemID naming.
+- Supports mixed selections across Cell, Chemical, Antibody, Primer,
+  Biological Sample, and other configured ItemTypes.
+- MetadataFields configuration is still preferred for labels.
+- If subtype columns exist but are missing from MetadataFields, they are
+  included as a fallback instead of silently dropping the entire ItemType.
+- Export still builds the union of metadata columns across all selected items.
+  Rows only populate fields relevant to their own ItemType.
+- Export status now reports how many selected items had subtype metadata found.
 
-v3.3 exports:
-- LocationID = the human-facing location ID, e.g. BX000164
-- Location = the full Description/path
-
-It also lets the resolver search the human-visible location ID and path.
-
-All v3.2 behavior remains unchanged.
-
-Deploy over the current batch-actions widget and use `?v=3.3`.
+Example behavior:
+Chemical rows can populate Catalogue/Lot/Storage/Vendor while Antibody rows
+populate Clone/Host/Conjugation/etc. in the same exported table, with blanks
+where a field does not apply.

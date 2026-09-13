@@ -86,7 +86,7 @@ select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
 const INVENTORY='Inventory', EVENTS='Events';
 const ITEMTYPE_CAND=['ItemTypes','Item_Types'], META_CAND=['MetadataFields','Metadata_Fields'];
 const LOCATION_CAND=['Location_Inventory','LocationInventory','Locations'];
-let invTable=null, inventoryRows=[], subtypeIndex=new Map(), subtypeData=new Map(), itemTypeConfig=[], metadataConfig=[], resolutions=[], lastExport=null, locationTableId=null, locationById=new Map();
+let invTable=null, inventoryRows=[], inventoryIdSet=new Set(), subtypeIndex=new Map(), subtypeData=new Map(), itemTypeConfig=[], metadataConfig=[], resolutions=[], lastExport=null, locationTableId=null, locationById=new Map();
 
 grist.ready({requiredAccess:'full'});
 
@@ -140,89 +140,163 @@ function itemDisplay(r){return `${primaryLabel(r)} · ${r.ItemName||'Unnamed'}${
 async function loadConfigAndSubtype(){
  subtypeIndex=new Map();
  subtypeData=new Map();
- const [itId,mfId]=await Promise.all([findTable(ITEMTYPE_CAND,['TypeName','MetadataTable']),findTable(META_CAND,['ItemType','FieldName'])]);
- if(!itId||!mfId)return;
- const [it,mf]=await Promise.all([grist.docApi.fetchTable(itId),grist.docApi.fetchTable(mfId)]);
- itemTypeConfig=it.id.map((id,i)=>({rowId:id,TypeName:getCol(it,'TypeName',i),MetadataTable:getCol(it,'MetadataTable',i),Active:getCol(it,'Active',i)})).filter(x=>x.TypeName&&(x.Active===''||x.Active==null||boolish(x.Active)));
- metadataConfig=mf.id.map((id,i)=>({rowId:id,ItemType:getCol(mf,'ItemType',i),FieldName:getCol(mf,'FieldName',i),Label:getCol(mf,'Label',i)||getCol(mf,'FieldName',i),Active:getCol(mf,'Active',i)})).filter(x=>x.FieldName&&(x.Active===''||x.Active==null||boolish(x.Active)));
+
+ const [itId,mfId]=await Promise.all([
+   findTable(ITEMTYPE_CAND,['TypeName','MetadataTable']),
+   findTable(META_CAND,['ItemType','FieldName'])
+ ]);
+ if(!itId)return;
+
+ const it=await grist.docApi.fetchTable(itId);
+ const mf=mfId?await grist.docApi.fetchTable(mfId):null;
+
+ itemTypeConfig=it.id.map((id,i)=>({
+   rowId:id,
+   TypeName:getCol(it,'TypeName',i),
+   MetadataTable:getCol(it,'MetadataTable',i),
+   Active:getCol(it,'Active',i)
+ })).filter(x=>x.TypeName&&(x.Active===''||x.Active==null||boolish(x.Active)));
+
+ metadataConfig=mf ? mf.id.map((id,i)=>({
+   rowId:id,
+   ItemType:getCol(mf,'ItemType',i),
+   FieldName:getCol(mf,'FieldName',i),
+   Label:getCol(mf,'Label',i)||getCol(mf,'FieldName',i),
+   Active:getCol(mf,'Active',i)
+ })).filter(x=>x.FieldName&&(x.Active===''||x.Active==null||boolish(x.Active))) : [];
+
  const tables=await grist.docApi.listTables();
+
+ function resolveTableId(raw){
+   if(raw==null||raw==='')return null;
+   const s=String(raw).trim();
+   if(tables.includes(s))return s;
+   const w=normName(s);
+   return tables.find(x=>{
+     const n=normName(x);
+     return n===w||n.startsWith(w)||w.startsWith(n);
+   })||null;
+ }
+
+ function detectInventoryLinkColumn(t){
+   const preferred=['Item','ItemName','InventoryItem','Inventory','ItemID'];
+   const candidates=[];
+
+   for(const [col,vals] of Object.entries(t)){
+     if(col==='id'||!Array.isArray(vals))continue;
+     let nonEmpty=0, matched=0;
+     for(const v of vals){
+       if(v===null||v===''||v===undefined)continue;
+       nonEmpty++;
+       const n=refNum(v);
+       if(n && inventoryIdSet.has(Number(n)))matched++;
+     }
+     if(matched){
+       const pref=preferred.indexOf(col);
+       candidates.push({
+         col,
+         matched,
+         ratio: matched/Math.max(1,nonEmpty),
+         preferred: pref>=0 ? (100-pref) : 0
+       });
+     }
+   }
+
+   candidates.sort((a,b)=>
+     b.ratio-a.ratio ||
+     b.matched-a.matched ||
+     b.preferred-a.preferred
+   );
+   return candidates[0]?.col||null;
+ }
+
+ function fieldsForType(type, actualCols, linkCol){
+   const configured=metadataConfig.filter(m=>{
+     const mtRef=refNum(m.ItemType);
+     return (mtRef && Number(mtRef)===Number(type.rowId)) ||
+            normName(m.ItemType)===normName(type.TypeName);
+   });
+
+   const out=[];
+   const seen=new Set();
+
+   // Prefer MetadataFields labels/configuration when available.
+   for(const cfg of configured){
+     let actual=cfg.FieldName;
+     if(!actualCols.includes(actual)){
+       const wanted=normName(cfg.FieldName);
+       actual=actualCols.find(c=>normName(c)===wanted)||null;
+     }
+     if(!actual||actual===linkCol||actual==='id')continue;
+     const key=normName(actual);
+     if(seen.has(key))continue;
+     seen.add(key);
+     out.push({actual,label:cfg.Label||cfg.FieldName,fieldName:cfg.FieldName});
+   }
+
+   // Robust fallback: if this subtype has columns that are not represented in
+   // MetadataFields, include them too. This prevents an ItemType from silently
+   // losing all subtype metadata in mixed ELN exports.
+   const skipNames=new Set([
+     normName(linkCol),
+     'id','itemid','itemname','inventory','inventoryitem',
+     'createdat','updatedat','createddate','modifieddate','lastmodified'
+   ]);
+   for(const actual of actualCols){
+     const key=normName(actual);
+     if(skipNames.has(key)||seen.has(key))continue;
+     seen.add(key);
+     out.push({actual,label:actual.replaceAll('_',' '),fieldName:actual});
+   }
+   return out;
+ }
+
  for(const type of itemTypeConfig){
-   let tableId=type.MetadataTable;
+   const tableId=resolveTableId(type.MetadataTable);
    if(!tableId)continue;
-   if(!tables.includes(tableId)){const w=normName(tableId);tableId=tables.find(x=>{const n=normName(x);return n===w||n.startsWith(w)||w.startsWith(n)})||null}
-   if(!tableId)continue;
+
    try{
      const t=await grist.docApi.fetchTable(tableId);
-
-     // The subtype -> Inventory reference was originally called Item.
-     // In the current document it is called ItemID. Support both.
-     // Find the subtype -> Inventory reference column.
-     // Current schema uses ItemName as Reference -> Inventory, while ItemID is
-     // merely a formula such as $ItemName.ItemID. Support the common variants.
-     const linkCandidates=['Item','ItemName','InventoryItem','Inventory','ItemID'];
-     let linkCol=null;
-
-     for(const c of linkCandidates){
-       if(!Array.isArray(t[c]))continue;
-
-       // A true Grist Reference arrives as numeric row IDs (or ref-shaped values).
-       // Prefer columns that actually contain resolvable Inventory row references.
-       const sample=t[c].find(v=>v!==null && v!=='' && v!==undefined);
-       if(sample!==undefined && refNum(sample)){
-         linkCol=c;
-         break;
-       }
-     }
-
+     const actualCols=Object.keys(t);
+     const linkCol=detectInventoryLinkColumn(t);
      if(!linkCol)continue;
 
-     // MetadataFields.ItemType is commonly a Grist Reference, so compare its
-     // underlying row id as well as its displayed/type text.
-     const cfgFields=metadataConfig.filter(m=>{
-       const mtRef=refNum(m.ItemType);
-       return (mtRef && Number(mtRef)===Number(type.rowId)) ||
-              normName(m.ItemType)===normName(type.TypeName);
-     });
-
-     const actualCols=Object.keys(t);
+     const exportFields=fieldsForType(type,actualCols,linkCol);
 
      for(let i=0;i<t.id.length;i++){
        const itemRef=refNum(t[linkCol][i]);
-       if(!itemRef)continue;
+       if(!itemRef || !inventoryIdSet.has(Number(itemRef)))continue;
 
-       const arr=subtypeIndex.get(itemRef)||[];
-       const meta=subtypeData.get(itemRef)||{};
+       const arr=subtypeIndex.get(Number(itemRef))||[];
+       const meta=subtypeData.get(Number(itemRef))||{};
 
-       for(const cfg of cfgFields){
-         let actual=cfg.FieldName;
-
-         // Be tolerant of spaces/underscores/case differences.
-         if(!actualCols.includes(actual)){
-           const wanted=normName(cfg.FieldName);
-           actual=actualCols.find(c=>normName(c)===wanted)||null;
-         }
-         if(!actual)continue;
-
-         const v=getCol(t,actual,i);
+       for(const cfg of exportFields){
+         const v=getCol(t,cfg.actual,i);
          if(v!==''&&v!=null){
            arr.push({
-             field:`${type.TypeName}.${cfg.FieldName}`,
+             field:`${type.TypeName}.${cfg.fieldName}`,
              value:String(v)
            });
-           meta[cfg.Label||cfg.FieldName]=v;
+
+           // If two ItemTypes use the same label (e.g. Storage), that is
+           // intentionally one shared ELN column. Type-specific fields remain
+           // separate because their labels differ.
+           meta[cfg.label]=v;
          }
        }
 
-       subtypeIndex.set(itemRef,arr);
-       subtypeData.set(itemRef,meta);
+       subtypeIndex.set(Number(itemRef),arr);
+       subtypeData.set(Number(itemRef),meta);
      }
-   }catch(e){}
+   }catch(e){
+     console.warn('Could not load subtype metadata for',type.TypeName,e);
+   }
  }
 }
-
 async function loadInventory(){
  invTable=await grist.docApi.fetchTable(INVENTORY);
  inventoryRows=invTable.id.map((id,i)=>{const r={id};for(const [k,col] of Object.entries(invTable))if(k!=='id'&&Array.isArray(col))r[k]=col[i];return r});
+ inventoryIdSet=new Set(inventoryRows.map(r=>Number(r.id)));
  await Promise.all([loadConfigAndSubtype(),loadLocations()]);
 }
 
@@ -442,7 +516,10 @@ function renderExport(){
  document.getElementById('exportHead').innerHTML='<tr>'+lastExport.columns.map(c=>`<th>${esc(c)}</th>`).join('')+'</tr>';
  document.getElementById('exportBody').innerHTML=lastExport.rows.map(r=>'<tr>'+lastExport.columns.map(c=>`<td>${esc(r[c]??'')}</td>`).join('')+'</tr>').join('');
  document.getElementById('exportPanel').classList.add('open');
- show(`${lastExport.rows.length} item(s) ready for ELN copy/export.`,'ok');
+ const selected=selectedRows();
+ const types=[...new Set(selected.map(r=>r.ItemType).filter(Boolean))];
+ const withMeta=selected.filter(r=>Object.keys(subtypeData.get(Number(r.id))||{}).length).length;
+ show(`${lastExport.rows.length} item(s) ready for ELN copy/export. Metadata found for ${withMeta}/${selected.length} selected item(s) across ${types.length} ItemType(s).`,'ok');
 }
 
 async function copyTsv(){
