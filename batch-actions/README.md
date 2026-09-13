@@ -1,21 +1,21 @@
-# Batch Actions v3.4
+# Batch Actions v3.5
 
-Fix for mixed ItemType metadata export ("Reagents / Samples Used Today").
+ELN export change:
+- Selected records are grouped by ItemType.
+- One separate ELN table is rendered per detected ItemType.
+- Each table contains:
+  - ItemID
+  - ItemName
+  - ItemType
+  - Status
+  - LocationID
+  - full Location path
+  - only the metadata columns present for that ItemType
+- Each ItemType table has its own Copy Table button.
+- Each ItemType table has its own Download CSV button.
+- CSV names are type-specific, e.g.:
+  antibodies_used_2026-09-13.csv
+  chemicals_used_2026-09-13.csv
+  cells_used_2026-09-13.csv
 
-Changes:
-- Subtype -> Inventory link detection now scans every subtype-table column and
-  chooses the column whose values actually resolve to Inventory row IDs.
-  It no longer relies only on Item / ItemName / ItemID naming.
-- Supports mixed selections across Cell, Chemical, Antibody, Primer,
-  Biological Sample, and other configured ItemTypes.
-- MetadataFields configuration is still preferred for labels.
-- If subtype columns exist but are missing from MetadataFields, they are
-  included as a fallback instead of silently dropping the entire ItemType.
-- Export still builds the union of metadata columns across all selected items.
-  Rows only populate fields relevant to their own ItemType.
-- Export status now reports how many selected items had subtype metadata found.
-
-Example behavior:
-Chemical rows can populate Catalogue/Lot/Storage/Vendor while Antibody rows
-populate Clone/Host/Conjugation/etc. in the same exported table, with blanks
-where a field does not apply.
+The subtype-link detection improvements from v3.4 are retained.

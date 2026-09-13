@@ -25,6 +25,11 @@ select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
 .good{background:#eaf8f2;color:#136846}.amb{background:#fff6dc;color:#765600}.none{background:#fdeeee;color:#962828}
 .small{font-size:.8rem;color:#777}
 @media(max-width:800px){.actions,.grid2{grid-template-columns:1fr}}
+
+.typeExport{border:1px solid #dfe3e7;border-radius:10px;padding:12px;margin-top:12px;background:#fff}
+.typeExportTitle{font-weight:750;font-size:1rem;margin-bottom:3px}
+.typeExportMeta{font-size:.78rem;color:#6f747b;margin-bottom:9px}
+.typeExport .toolbar{margin-top:9px}
 </style>
 </head>
 <body>
@@ -60,15 +65,9 @@ select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
 </div>
 
 <div id="exportPanel" class="panel">
-<div><b>Metadata table for ELN</b></div>
-<div class="small" style="margin:6px 0 10px">Core Inventory fields plus the union of configured subtype metadata fields. Location references are dereferenced to both LocationID and full path.</div>
-<div style="overflow:auto">
-<table><thead id="exportHead"></thead><tbody id="exportBody"></tbody></table>
-</div>
-<div class="toolbar">
-<button id="copyTsvBtn" class="primary">COPY TABLE</button>
-<button id="downloadCsvBtn" class="secondary">DOWNLOAD CSV</button>
-</div>
+<div><b>Metadata tables for ELN</b></div>
+<div class="small" style="margin:6px 0 10px">One table is created for each ItemType detected. Each table contains core Inventory fields plus metadata relevant to that ItemType.</div>
+<div id="exportTables"></div>
 </div>
 
 <div id="aliquotPanel" class="panel">
@@ -86,7 +85,7 @@ select,input{padding:7px;border:1px solid #cfd3da;border-radius:7px}
 const INVENTORY='Inventory', EVENTS='Events';
 const ITEMTYPE_CAND=['ItemTypes','Item_Types'], META_CAND=['MetadataFields','Metadata_Fields'];
 const LOCATION_CAND=['Location_Inventory','LocationInventory','Locations'];
-let invTable=null, inventoryRows=[], inventoryIdSet=new Set(), subtypeIndex=new Map(), subtypeData=new Map(), itemTypeConfig=[], metadataConfig=[], resolutions=[], lastExport=null, locationTableId=null, locationById=new Map();
+let invTable=null, inventoryRows=[], inventoryIdSet=new Set(), subtypeIndex=new Map(), subtypeData=new Map(), itemTypeConfig=[], metadataConfig=[], resolutions=[], lastExports=new Map(), locationTableId=null, locationById=new Map();
 
 grist.ready({requiredAccess:'full'});
 
@@ -488,57 +487,157 @@ function csvEscape(v){
  return /[",\n]/.test(s)?`"${s.replaceAll('"','""')}"`:s;
 }
 
-function getExportRows(){
- const rows=selectedRows();
+function buildExportForRows(rows){
  if(!rows.length)return {columns:[],rows:[]};
  const core=['ItemID','ItemName','ItemType','Status','LocationID','Location'];
  const keys=new Set();
+
  for(const r of rows){
    const meta=subtypeData.get(Number(r.id))||{};
    Object.keys(meta).forEach(k=>keys.add(k));
  }
+
  const metaCols=[...keys].sort((a,b)=>a.localeCompare(b));
  const columns=[...core,...metaCols];
+
  const out=rows.map(r=>{
    const meta=subtypeData.get(Number(r.id))||{};
    const loc=locationInfoFromRef(r.LocationID);
-   const row={ItemID:primaryLabel(r),ItemName:r.ItemName||'',ItemType:r.ItemType||'',Status:r.Status||'',LocationID:loc.id,Location:loc.path};
+   const row={
+     ItemID:primaryLabel(r),
+     ItemName:r.ItemName||'',
+     ItemType:r.ItemType||'',
+     Status:r.Status||'',
+     LocationID:loc.id,
+     Location:loc.path
+   };
    for(const k of metaCols)row[k]=meta[k]??'';
    return row;
  });
+
  return {columns,rows:out};
 }
 
-function renderExport(){
- if(resolutions.some(r=>!r.selected))return show('Resolve or remove every ambiguous/unmatched input before exporting metadata.','warn');
- lastExport=getExportRows();
- if(!lastExport.rows.length)return show('No resolved items to export.','warn');
- document.getElementById('exportHead').innerHTML='<tr>'+lastExport.columns.map(c=>`<th>${esc(c)}</th>`).join('')+'</tr>';
- document.getElementById('exportBody').innerHTML=lastExport.rows.map(r=>'<tr>'+lastExport.columns.map(c=>`<td>${esc(r[c]??'')}</td>`).join('')+'</tr>').join('');
- document.getElementById('exportPanel').classList.add('open');
+function getExportsByType(){
  const selected=selectedRows();
- const types=[...new Set(selected.map(r=>r.ItemType).filter(Boolean))];
+ const groups=new Map();
+
+ for(const r of selected){
+   const type=String(r.ItemType||'Unspecified').trim()||'Unspecified';
+   if(!groups.has(type))groups.set(type,[]);
+   groups.get(type).push(r);
+ }
+
+ const exports=new Map();
+ for(const [type,rows] of groups.entries()){
+   exports.set(type,buildExportForRows(rows));
+ }
+ return exports;
+}
+
+function safeFilePart(v){
+ return String(v||'items')
+   .trim()
+   .toLowerCase()
+   .replace(/[^a-z0-9]+/g,'_')
+   .replace(/^_+|_+$/g,'') || 'items';
+}
+
+function exportCardId(type){
+ return 'type_export_'+safeFilePart(type)+'_'+Math.abs([...String(type)].reduce((a,c)=>((a<<5)-a+c.charCodeAt(0))|0,0));
+}
+
+function renderExport(){
+ if(resolutions.some(r=>!r.selected))
+   return show('Resolve or remove every ambiguous/unmatched input before exporting metadata.','warn');
+
+ lastExports=getExportsByType();
+ const total=[...lastExports.values()].reduce((n,x)=>n+x.rows.length,0);
+ if(!total)return show('No resolved items to export.','warn');
+
+ const host=document.getElementById('exportTables');
+ host.innerHTML='';
+
+ for(const [type,data] of lastExports.entries()){
+   const id=exportCardId(type);
+   const card=document.createElement('div');
+   card.className='typeExport';
+   card.innerHTML=`
+     <div class="typeExportTitle">${esc(type)} Used Today</div>
+     <div class="typeExportMeta">${data.rows.length} item${data.rows.length===1?'':'s'} · ${data.columns.length} columns</div>
+     <div style="overflow:auto">
+       <table>
+         <thead><tr>${data.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead>
+         <tbody>${data.rows.map(r=>`<tr>${data.columns.map(c=>`<td>${esc(r[c]??'')}</td>`).join('')}</tr>`).join('')}</tbody>
+       </table>
+     </div>
+     <div class="toolbar">
+       <button class="primary" data-copy-type="${esc(type)}">COPY ${esc(type.toUpperCase())} TABLE</button>
+       <button class="secondary" data-csv-type="${esc(type)}">DOWNLOAD ${esc(type.toUpperCase())} CSV</button>
+     </div>`;
+   host.appendChild(card);
+ }
+
+ host.querySelectorAll('[data-copy-type]').forEach(b=>{
+   b.onclick=()=>copyTypeTsv(b.getAttribute('data-copy-type'));
+ });
+ host.querySelectorAll('[data-csv-type]').forEach(b=>{
+   b.onclick=()=>downloadTypeCsv(b.getAttribute('data-csv-type'));
+ });
+
+ document.getElementById('exportPanel').classList.add('open');
+
+ const selected=selectedRows();
  const withMeta=selected.filter(r=>Object.keys(subtypeData.get(Number(r.id))||{}).length).length;
- show(`${lastExport.rows.length} item(s) ready for ELN copy/export. Metadata found for ${withMeta}/${selected.length} selected item(s) across ${types.length} ItemType(s).`,'ok');
+ show(`${total} item(s) split into ${lastExports.size} ItemType table(s). Metadata found for ${withMeta}/${selected.length} selected item(s).`,'ok');
 }
 
-async function copyTsv(){
- if(!lastExport)renderExport();
- if(!lastExport)return;
- const text=[lastExport.columns.join('\t'),...lastExport.rows.map(r=>lastExport.columns.map(c=>String(r[c]??'')).join('\t'))].join('\n');
- try{await navigator.clipboard.writeText(text)}
- catch(e){const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove()}
- show('Table copied. Paste directly into your ELN or spreadsheet.','ok');
+async function copyTypeTsv(type){
+ if(!lastExports?.size)renderExport();
+ const data=lastExports.get(type);
+ if(!data)return;
+
+ const text=[
+   data.columns.join('\t'),
+   ...data.rows.map(r=>data.columns.map(c=>String(r[c]??'')).join('\t'))
+ ].join('\n');
+
+ try{
+   await navigator.clipboard.writeText(text);
+ }catch(e){
+   const ta=document.createElement('textarea');
+   ta.value=text;
+   document.body.appendChild(ta);
+   ta.select();
+   document.execCommand('copy');
+   ta.remove();
+ }
+ show(`${type} table copied. Paste directly into your ELN or spreadsheet.`,'ok');
 }
 
-function downloadCsv(){
- if(!lastExport)renderExport();
- if(!lastExport)return;
- const csv=[lastExport.columns.map(csvEscape).join(','),...lastExport.rows.map(r=>lastExport.columns.map(c=>csvEscape(r[c])).join(','))].join('\n');
- const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');
- a.href=url;a.download=`reagents_samples_used_${new Date().toISOString().slice(0,10)}.csv`;
- document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
- show('CSV downloaded.','ok');
+function downloadTypeCsv(type){
+ if(!lastExports?.size)renderExport();
+ const data=lastExports.get(type);
+ if(!data)return;
+
+ const csv=[
+   data.columns.map(csvEscape).join(','),
+   ...data.rows.map(r=>data.columns.map(c=>csvEscape(r[c])).join(','))
+ ].join('\n');
+
+ const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement('a');
+ const date=new Date().toISOString().slice(0,10);
+
+ a.href=url;
+ a.download=`${safeFilePart(type)}_used_${date}.csv`;
+ document.body.appendChild(a);
+ a.click();
+ a.remove();
+ URL.revokeObjectURL(url);
+
+ show(`${type} CSV downloaded.`,'ok');
 }
 
 document.getElementById('resolveBtn').onclick=resolveAll;
@@ -548,8 +647,6 @@ document.getElementById('discardBtn').onclick=()=>lifecycle('Discarded','Discard
 document.getElementById('aliquotBtn').onclick=()=>document.getElementById('aliquotPanel').classList.toggle('open');
 document.getElementById('confirmAliquot').onclick=aliquot;
 document.getElementById('exportBtn').onclick=renderExport;
-document.getElementById('copyTsvBtn').onclick=copyTsv;
-document.getElementById('downloadCsvBtn').onclick=downloadCsv;
 document.getElementById('input').oninput=()=>document.getElementById('count').textContent=`${terms().length} input value(s)`;
 
 (async()=>{try{show('Loading inventory and subtype metadata…','warn');await loadInventory();hide()}catch(e){show('Setup error: '+(e.message||e),'err')}})();
