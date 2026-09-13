@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Unified Storage Map v5</title>
+<title>Unified Storage Map v5.1</title>
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#252631}
@@ -234,7 +234,11 @@ function renderGrid(){
   if(assigned.unplaced.length){
     ib.style.display='block';
     ib.innerHTML=`<h4>${assigned.unplaced.length} unplaced / invalid record${assigned.unplaced.length===1?'':'s'}</h4><div class="meta">These records still retain their real database location. They are not assigned to a fake visual slot.</div>`+
-      assigned.unplaced.map(o=>`<div class="invalidrow"><b>${esc(o.kind==='location'?locLabel(o.data):itemLabel(o.data))}</b> · ${esc(o.reason)}</div>`).join('');
+      assigned.unplaced.map(o=>{
+        const ident=o.kind==='location'?(o.data.LocationID||''):(o.data.ItemID||'');
+        const kindLabel=o.kind==='location'?'Location':'Item';
+        return `<div class="invalidrow"><b>${esc(o.kind==='location'?locLabel(o.data):itemLabel(o.data))}</b>${ident?` · <span class="tid">${esc(ident)}</span>`:''} · ${kindLabel} · ${esc(o.reason)}</div>`;
+      }).join('');
   }else{ib.style.display='none';ib.innerHTML=''}
 }
 
