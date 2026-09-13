@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Unified Storage Map v2</title>
+<title>Unified Storage Map v3</title>
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#252631}
@@ -82,11 +82,13 @@ const norm=v=>String(v??'').trim().toLowerCase();
 function refNum(v){if(typeof v==='number')return v;if(Array.isArray(v)&&v[0]==='R')return Number(v[1]);const n=Number(v);return Number.isFinite(n)&&n>0?n:null}
 function esc(v){return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;')}
 function scalar(v){return typeof v==='string'||typeof v==='number'||typeof v==='boolean'}
+function isTrue(v){return v===true||v===1||['true','yes','1'].includes(String(v??'').trim().toLowerCase())}
+function locIsActive(r){return !r?false:(!('Active' in r)||isTrue(r.Active))}
 async function findLocTable(){const ts=await grist.docApi.listTables();for(const c of LOC_CAND)if(ts.includes(c))return c;for(const id of ts){try{const t=await grist.docApi.fetchTable(id),s=new Set(Object.keys(t));if(s.has('ParentLocationID')&&s.has('LocationID')&&s.has('Type'))return id}catch(e){}}return null}
 function rowify(t){return t.id.map((id,i)=>{const r={id};for(const [k,c] of Object.entries(t))if(k!=='id'&&Array.isArray(c))r[k]=c[i];return r})}
 function locLabel(r){return String(r?.Name||'').trim()||String(r?.LocationID||'').trim()||`Location ${r?.id}`}
 function itemLabel(r){return String(r?.ItemName||'').trim()||String(r?.ItemID||'').trim()||`Item ${r?.id}`}
-function locKids(id){return locRows.filter(r=>id==null?(!r.parentId||!locById.has(Number(r.parentId))):Number(r.parentId)===Number(id))}
+function locKids(id){return locRows.filter(r=>locIsActive(r)&&(id==null?(!r.parentId||!locById.has(Number(r.parentId))||!locIsActive(locById.get(Number(r.parentId)))):Number(r.parentId)===Number(id)))}
 function activeItems(id){return invRows.filter(r=>norm(r.Status)==='active'&&Number(r.locationRef)===Number(id))}
 function ancestors(id){const a=[];let r=id==null?null:locById.get(Number(id)),seen=new Set();while(r&&!seen.has(r.id)){seen.add(r.id);a.push(r);r=r.parentId?locById.get(Number(r.parentId)):null}return a.reverse()}
 function pathFor(id){return ancestors(id).map(locLabel).join(' › ')}
@@ -138,7 +140,7 @@ function computeMatches(){
   locMatches=new Set(); itemMatches=new Set(); searchHits=[];
   const s=norm(q);
   if(!s){document.getElementById('searchCount').textContent='';renderSearchResults();return}
-  for(const r of locRows)if(locText(r).includes(s)){locMatches.add(Number(r.id));searchHits.push({kind:'location',id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`})}
+  for(const r of locRows)if(locIsActive(r)&&locText(r).includes(s)){locMatches.add(Number(r.id));searchHits.push({kind:'location',id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`})}
   for(const r of invRows)if(norm(r.Status)==='active'&&itemText(r).includes(s)){itemMatches.add(Number(r.id));const l=locById.get(Number(r.locationRef));searchHits.push({kind:'item',id:r.id,title:itemLabel(r),meta:`${r.ItemType||'Item'} · ${r.ItemID||''} · ${l?.Description||pathFor(r.locationRef)||'Unassigned'}`})}
   searchHits.sort((a,b)=>{const ae=norm(a.title)===s?0:1,be=norm(b.title)===s?0:1;return ae-be||a.title.localeCompare(b.title)});
   searchSel=0; document.getElementById('searchCount').textContent=`${searchHits.length} match${searchHits.length===1?'':'es'}`;renderSearchResults();
@@ -152,10 +154,10 @@ function renderSearchResults(){
 }
 function openHit(h){
   document.getElementById('searchResults').style.display='none';
-  if(h.kind==='location'){currentId=Number(h.id);render();syncLoc(currentId)}
+  if(h.kind==='location'){const lr=locById.get(Number(h.id));if(!locIsActive(lr))return;currentId=Number(h.id);render();syncLoc(currentId)}
   else{const r=itemById.get(Number(h.id));if(r?.locationRef){currentId=Number(r.locationRef);render();syncLoc(currentId)}}
 }
-function branchCount(id){let c=0,stack=[Number(id)],seen=new Set();while(stack.length){const cur=stack.pop();if(seen.has(cur))continue;seen.add(cur);if(locMatches.has(cur))c++;c+=invRows.filter(r=>norm(r.Status)==='active'&&Number(r.locationRef)===cur&&itemMatches.has(Number(r.id))).length;for(const k of locRows)if(Number(k.parentId)===cur)stack.push(Number(k.id))}return c}
+function branchCount(id){let c=0,stack=[Number(id)],seen=new Set();while(stack.length){const cur=stack.pop();if(seen.has(cur))continue;seen.add(cur);if(locMatches.has(cur))c++;c+=invRows.filter(r=>norm(r.Status)==='active'&&Number(r.locationRef)===cur&&itemMatches.has(Number(r.id))).length;for(const k of locRows)if(locIsActive(k)&&Number(k.parentId)===cur)stack.push(Number(k.id))}return c}
 
 async function load(){
   locTable=await findLocTable();if(!locTable)throw new Error('Location Inventory table not found');
@@ -165,7 +167,13 @@ async function load(){
   for(const r of invRows)r.locationRef=refNum(r.LocationID);
   locById=new Map(locRows.map(r=>[Number(r.id),r]));itemById=new Map(invRows.map(r=>[Number(r.id),r]));
   try{eventCols=new Set(Object.keys(await grist.docApi.fetchTable(EVENTS)))}catch(e){eventCols=new Set()}
-  await loadSubtypeSearchData();computeMatches();render();
+  await loadSubtypeSearchData();
+  if(currentId!=null && !locIsActive(locById.get(Number(currentId)))){
+    let p=locById.get(Number(currentId));
+    while(p && !locIsActive(p)) p=p.parentId?locById.get(Number(p.parentId)):null;
+    currentId=p?.id||null;
+  }
+  computeMatches();render();
   const bad=invalidObjectsAt(currentId);
   if(bad.length)show(`${bad.length} record(s) in this location have invalid or colliding Position values. They are shown in red.`, 'warn');
 }
@@ -208,7 +216,7 @@ async function logEvent(fields){if(!eventCols.size)return;const f=existingEventF
 async function moveEmpty(d,to){if(currentId==null&&d.kind==='item')return;const cap=capacity(currentId);if(cap&&to>cap)return show(`Position ${to} exceeds capacity ${cap}.`,'err');try{if(d.kind==='location')await relocateLocation(Number(d.id),currentId,to,false);else await relocateItem(Number(d.id),currentId,to,false);await load()}catch(e){show('Move failed: '+(e.message||e),'err')}}
 async function swap(d,target,to){if(d.kind==='item'&&target.kind==='location')return relocateItem(Number(d.id),Number(target.id),null);if(Number(d.from)===Number(to))return;try{await grist.docApi.applyUserActions([['UpdateRecord',d.kind==='location'?locTable:INV,Number(d.id),{Position:Number(to)}],['UpdateRecord',target.kind==='location'?locTable:INV,Number(target.id),{Position:Number(d.from)}]]);if(d.kind==='item')await logEvent({Item:Number(d.id),EventType:'Relocated',Notes:`Position changed from ${d.from} to ${to} within ${locById.get(currentId)?.Description||locLabel(locById.get(currentId))}`});if(target.kind==='item')await logEvent({Item:Number(target.id),EventType:'Relocated',Notes:`Position changed from ${to} to ${d.from} within ${locById.get(currentId)?.Description||locLabel(locById.get(currentId))}`});show('Positions swapped.','ok');await load()}catch(e){show('Swap failed: '+(e.message||e),'err')}}
 async function relocateItem(itemId,targetId,pos=null,ask=true){
-  const item=itemById.get(itemId),target=locById.get(Number(targetId));if(!item||!target)return;
+  const item=itemById.get(itemId),target=locById.get(Number(targetId));if(!item||!target)return;if(!locIsActive(target))return show('That destination location is inactive.','err');
   const oldLoc=locById.get(Number(item.locationRef)),oldPos=item.Position,occ=occupied(targetId,`item:${itemId}`),cap=capacity(targetId);
   if(pos==null){pos=1;while(occ.has(pos))pos++}
   if(cap&&pos>cap)return show(`${locLabel(target)} has no free position at ${pos}. Capacity is ${cap}.`,'err');
@@ -221,7 +229,7 @@ async function relocateItem(itemId,targetId,pos=null,ask=true){
 function isDescendant(candidateParent,movingId){let r=locById.get(Number(candidateParent)),seen=new Set();while(r&&!seen.has(r.id)){if(Number(r.id)===Number(movingId))return true;seen.add(r.id);r=r.parentId?locById.get(Number(r.parentId)):null}return false}
 async function relocateLocation(id,targetId,pos,ask=true){
   const r=locById.get(id);if(!r)return;if(String(r.Type||'')==='Room')return show('Rooms cannot be relocated under another location.','err');if(targetId==null)return show('Use a real parent location. Root relocation is not allowed for non-Room locations.','err');if(Number(id)===Number(targetId)||isDescendant(targetId,id))return show('That move would create a circular location hierarchy.','err');
-  const target=locById.get(Number(targetId)),old=locById.get(Number(r.parentId)),oldPos=r.Position,occ=occupied(targetId,`location:${id}`),cap=capacity(targetId);
+  const target=locById.get(Number(targetId));if(!locIsActive(target))return show('That destination location is inactive.','err');const old=locById.get(Number(r.parentId)),oldPos=r.Position,occ=occupied(targetId,`location:${id}`),cap=capacity(targetId);
   if(cap&&pos>cap)return show(`Position ${pos} exceeds ${locLabel(target)} capacity ${cap}.`,'err');if(occ.has(pos))return show(`Position ${pos} is already occupied.`,'err');
   if(ask&&!confirm(`Relocate ${locLabel(r)} to:\n\n${target.Description||locLabel(target)}\nPosition ${pos}?`))return;
   await grist.getTable(locTable).update({id,fields:{ParentLocationID:targetId,Position:pos}});
@@ -241,7 +249,7 @@ function renderPickList(){
   if(modalMode==='item'){
     rows=invRows.filter(r=>norm(r.Status)==='active'&&(!s||itemText(r).includes(s))).slice(0,100).map(r=>({id:r.id,title:itemLabel(r),meta:`${r.ItemType||'Item'} · ${r.ItemID||''} · ${locById.get(Number(r.locationRef))?.Description||'Unassigned'}`}));
   }else{
-    rows=locRows.filter(r=>String(r.Type||'')!=='Room'&&Number(r.id)!==Number(currentId)&&!isDescendant(currentId,r.id)&&(!s||locText(r).includes(s))).slice(0,100).map(r=>({id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`}));
+    rows=locRows.filter(r=>locIsActive(r)&&String(r.Type||'')!=='Room'&&Number(r.id)!==Number(currentId)&&!isDescendant(currentId,r.id)&&(!s||locText(r).includes(s))).slice(0,100).map(r=>({id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`}));
   }
   e.innerHTML=rows.length?rows.map(r=>`<div class="pick" data-id="${r.id}"><div class="picktitle">${esc(r.title)}</div><div class="pickmeta">${esc(r.meta)}</div></div>`).join(''):'<div class="pickmeta" style="padding:12px">No matches.</div>';
   e.querySelectorAll('.pick').forEach(x=>x.onclick=async()=>{const id=Number(x.dataset.id);try{if(modalMode==='item')await relocateItem(id,currentId,modalSlot,true);else await relocateLocation(id,currentId,modalSlot,true);closeModal();await load()}catch(err){show('Relocation failed: '+(err.message||err),'err')}});
@@ -256,6 +264,15 @@ document.getElementById('search').oninput=e=>{q=e.target.value;computeMatches();
 document.getElementById('search').onkeydown=e=>{if(e.key==='ArrowDown'){e.preventDefault();searchSel=Math.min(searchSel+1,searchHits.length-1);renderSearchResults()}else if(e.key==='ArrowUp'){e.preventDefault();searchSel=Math.max(0,searchSel-1);renderSearchResults()}else if(e.key==='Enter'&&searchHits.length){e.preventDefault();openHit(searchHits[searchSel]||searchHits[0])}else if(e.key==='Escape')document.getElementById('searchResults').style.display='none'};
 document.getElementById('clearSearch').onclick=()=>{document.getElementById('search').value='';q='';computeMatches();render()};
 document.getElementById('itemTab').onclick=()=>setModalMode('item');document.getElementById('locTab').onclick=()=>setModalMode('location');document.getElementById('modalSearch').oninput=renderPickList;document.getElementById('modalCancel').onclick=closeModal;document.getElementById('backdrop').onclick=e=>{if(e.target.id==='backdrop')closeModal()};
+
+// Close only the suggestions list when clicking elsewhere.
+// The search query stays unchanged, so map highlighting remains active.
+document.addEventListener('pointerdown',e=>{
+  const wrap=document.querySelector('.searchwrap');
+  if(wrap && !wrap.contains(e.target)) document.getElementById('searchResults').style.display='none';
+});
+document.getElementById('search').addEventListener('focus',()=>{if(q&&searchHits.length)renderSearchResults()});
+
 (async()=>{try{await load()}catch(e){show('Storage map error: '+(e.message||e),'err')}})();
 </script>
 </body>
