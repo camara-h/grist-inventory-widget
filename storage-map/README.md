@@ -1,15 +1,16 @@
-# Unified Storage Map v3
+# Unified Storage Map v5
 
-Changes from v2:
-- If Location Inventory has an `Active` toggle, only Active locations are displayed.
-- Main location search only returns Active locations.
-- Add Existing Location only returns Active locations.
-- Inventory remains limited to `Status = Active`.
-- Item/location relocation refuses inactive destination locations.
-- Search suggestions navigate only when clicked or selected with Enter.
-- Clicking outside the search dropdown closes only the dropdown. Search text and map highlighting remain active.
-- Focusing the search box again reopens the suggestions while the query remains.
-- If the currently displayed location becomes inactive, the map falls back to an active ancestor or Root.
+Behavior change requested:
+- Item -> Location tile now SWAPS their Position values.
+- Location -> Location tile also swaps positions.
+- Item -> Item continues to swap positions.
+- Dragging to an empty slot continues to move within the current parent.
+- Dragging onto breadcrumbs no longer relocates anything. Breadcrumbs are navigation-only.
+- Drag-and-drop never moves an item inside another location.
 
-`Active` is treated as active for boolean true / 1 / "true" / "yes".
-If there is no Active column, locations remain backward-compatible and are all considered active.
+To move an item into a child/other location:
+1. Navigate into the destination location.
+2. Click an empty slot.
+3. Use Add Existing Item.
+
+This makes cross-location relocation explicit and harder to do accidentally.

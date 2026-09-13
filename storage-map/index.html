@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Unified Storage Map v3</title>
+<title>Unified Storage Map v5</title>
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#252631}
@@ -27,7 +27,7 @@ h2{margin:0 0 4px}.sub,.meta,.note{color:#6d7078;font-size:.82rem}
 .tile.pathmatch{background:#fff7d6;border-color:#e7c85a}.tile.exactmatch{background:#eaf8f2;border-color:#48a77b;box-shadow:0 0 0 2px rgba(72,167,123,.12)}
 .tile.invalid{background:#fdeeee;border-color:#cc6363}.type{font-size:.68rem;text-transform:uppercase;color:#7a7e87;margin-bottom:4px}.tname{font-weight:700}.tid{font-family:ui-monospace,monospace;font-size:.73rem;color:#7a7e87;margin-top:4px}.count{font-size:.72rem;color:#666b74;margin-top:6px}
 .status{display:none;padding:9px;border-radius:8px;margin-top:10px;white-space:pre-wrap}.ok{display:block;background:#eaf8f2;color:#136846}.err{display:block;background:#fdeeee;color:#962828}.warn{display:block;background:#fff6dc;color:#765600}
-.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:.76rem;color:#6d7078}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}.locdot{background:#8b93a1}.itemdot{background:#16b378}.matchdot{background:#e7c85a}.invaliddot{background:#cc6363}
+.invalidbox{display:none;margin-top:12px;border:1px solid #d99191;background:#fff5f5;border-radius:10px;padding:10px}.invalidbox h4{margin:0 0 6px;color:#8d3030}.invalidrow{padding:7px 0;border-top:1px solid #efd0d0}.invalidrow:first-of-type{border-top:0}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:.76rem;color:#6d7078}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}.locdot{background:#8b93a1}.itemdot{background:#16b378}.matchdot{background:#e7c85a}.invaliddot{background:#cc6363}
 .backdrop{display:none;position:fixed;z-index:50;inset:0;background:rgba(0,0,0,.32);align-items:center;justify-content:center;padding:18px}
 .modal{background:#fff;border-radius:14px;max-width:720px;width:100%;max-height:85vh;overflow:auto;padding:18px;box-shadow:0 15px 45px rgba(0,0,0,.22)}
 .modal h3{margin:0 0 5px}.modalrow{display:flex;gap:8px;margin:12px 0}.modalrow input{flex:1}.tabs{display:flex;gap:6px;margin-top:12px}.tab.active{background:#16b378;color:white}
@@ -50,12 +50,13 @@ h2{margin:0 0 4px}.sub,.meta,.note{color:#6d7078;font-size:.82rem}
 <div class="panel">
   <div id="header"></div>
   <div id="grid" class="grid"></div>
+  <div id="invalidBox" class="invalidbox"></div>
   <div id="status" class="status"></div>
   <div class="legend">
     <span><i class="dot locdot"></i>Location</span><span><i class="dot itemdot"></i>Active item</span>
     <span><i class="dot matchdot"></i>Branch to match</span><span><i class="dot invaliddot"></i>Invalid stored position</span>
   </div>
-  <div class="note">Click an empty slot to place an existing item/location there. Dragging still works for quick moves and swaps.</div>
+  <div class="note">Click an empty slot to place an existing item/location there. Dragging onto an occupied slot swaps positions. Dragging never moves an item inside a location.</div>
 </div>
 
 <div id="backdrop" class="backdrop">
@@ -84,11 +85,20 @@ function esc(v){return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt
 function scalar(v){return typeof v==='string'||typeof v==='number'||typeof v==='boolean'}
 function isTrue(v){return v===true||v===1||['true','yes','1'].includes(String(v??'').trim().toLowerCase())}
 function locIsActive(r){return !r?false:(!('Active' in r)||isTrue(r.Active))}
+function locEffectivelyActive(r){
+  if(!locIsActive(r))return false;
+  let p=r.parentId?locById.get(Number(r.parentId)):null,seen=new Set([Number(r.id)]);
+  while(p&&!seen.has(Number(p.id))){
+    if(!locIsActive(p))return false;
+    seen.add(Number(p.id));p=p.parentId?locById.get(Number(p.parentId)):null;
+  }
+  return true;
+}
 async function findLocTable(){const ts=await grist.docApi.listTables();for(const c of LOC_CAND)if(ts.includes(c))return c;for(const id of ts){try{const t=await grist.docApi.fetchTable(id),s=new Set(Object.keys(t));if(s.has('ParentLocationID')&&s.has('LocationID')&&s.has('Type'))return id}catch(e){}}return null}
 function rowify(t){return t.id.map((id,i)=>{const r={id};for(const [k,c] of Object.entries(t))if(k!=='id'&&Array.isArray(c))r[k]=c[i];return r})}
 function locLabel(r){return String(r?.Name||'').trim()||String(r?.LocationID||'').trim()||`Location ${r?.id}`}
 function itemLabel(r){return String(r?.ItemName||'').trim()||String(r?.ItemID||'').trim()||`Item ${r?.id}`}
-function locKids(id){return locRows.filter(r=>locIsActive(r)&&(id==null?(!r.parentId||!locById.has(Number(r.parentId))||!locIsActive(locById.get(Number(r.parentId)))):Number(r.parentId)===Number(id)))}
+function locKids(id){return locRows.filter(r=>locIsActive(r)&&(id==null?(!r.parentId||!locById.has(Number(r.parentId))):Number(r.parentId)===Number(id)))}
 function activeItems(id){return invRows.filter(r=>norm(r.Status)==='active'&&Number(r.locationRef)===Number(id))}
 function ancestors(id){const a=[];let r=id==null?null:locById.get(Number(id)),seen=new Set();while(r&&!seen.has(r.id)){seen.add(r.id);a.push(r);r=r.parentId?locById.get(Number(r.parentId)):null}return a.reverse()}
 function pathFor(id){return ancestors(id).map(locLabel).join(' › ')}
@@ -140,7 +150,7 @@ function computeMatches(){
   locMatches=new Set(); itemMatches=new Set(); searchHits=[];
   const s=norm(q);
   if(!s){document.getElementById('searchCount').textContent='';renderSearchResults();return}
-  for(const r of locRows)if(locIsActive(r)&&locText(r).includes(s)){locMatches.add(Number(r.id));searchHits.push({kind:'location',id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`})}
+  for(const r of locRows)if(locEffectivelyActive(r)&&locText(r).includes(s)){locMatches.add(Number(r.id));searchHits.push({kind:'location',id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`})}
   for(const r of invRows)if(norm(r.Status)==='active'&&itemText(r).includes(s)){itemMatches.add(Number(r.id));const l=locById.get(Number(r.locationRef));searchHits.push({kind:'item',id:r.id,title:itemLabel(r),meta:`${r.ItemType||'Item'} · ${r.ItemID||''} · ${l?.Description||pathFor(r.locationRef)||'Unassigned'}`})}
   searchHits.sort((a,b)=>{const ae=norm(a.title)===s?0:1,be=norm(b.title)===s?0:1;return ae-be||a.title.localeCompare(b.title)});
   searchSel=0; document.getElementById('searchCount').textContent=`${searchHits.length} match${searchHits.length===1?'':'es'}`;renderSearchResults();
@@ -175,7 +185,7 @@ async function load(){
   }
   computeMatches();render();
   const bad=invalidObjectsAt(currentId);
-  if(bad.length)show(`${bad.length} record(s) in this location have invalid or colliding Position values. They are shown in red.`, 'warn');
+  if(bad.length)show(`${bad.length} record(s) in this location have invalid or colliding Position values. Invalid records are listed below the grid and keep their real database location.`, 'warn');
 }
 function capacity(id){if(id==null)return null;const p=locById.get(Number(id)),rr=Number(p?.Rows),cc=Number(p?.Columns);return Number.isInteger(rr)&&rr>0&&Number.isInteger(cc)&&cc>0?rr*cc:null}
 function spec(){if(currentId==null){const n=locKids(null).length;return {cols:7,slots:Math.max(7,Math.ceil(Math.max(1,n)/7)*7)}}const p=locById.get(Number(currentId)),rr=Number(p?.Rows),cc=Number(p?.Columns);if(Number.isInteger(rr)&&rr>0&&Number.isInteger(cc)&&cc>0)return {cols:cc,slots:rr*cc};const os=[...locKids(currentId),...activeItems(currentId)],maxp=Math.max(0,...os.map(o=>Number(o.Position)||0)),need=Math.max(os.length,maxp,1);return {cols:7,slots:Math.max(7,Math.ceil(need/7)*7)}}
@@ -186,22 +196,33 @@ function invalidObjectsAt(id){
   for(const o of os){const p=Number(o.position);if(!Number.isInteger(p)||p<1||(cap&&p>cap)){bad.push(o);continue}if(seen.has(p)){bad.push(o);bad.push(seen.get(p))}else seen.set(p,o)}
   return [...new Map(bad.map(x=>[`${x.kind}:${x.id}`,x])).values()];
 }
-function assign(objects,slots){const used=new Set(),m=new Map();for(const o of objects){const p=Number(o.position);if(Number.isInteger(p)&&p>=1&&p<=slots&&!used.has(p)){m.set(`${o.kind}:${o.id}`,p);used.add(p)}}for(const o of objects){const k=`${o.kind}:${o.id}`;if(m.has(k))continue;let p=1;while(used.has(p))p++;m.set(k,p);used.add(p)}return m}
+function assign(objects,slots){
+  const used=new Set(),m=new Map(),unplaced=[];
+  for(const o of objects){
+    const p=Number(o.position),k=`${o.kind}:${o.id}`;
+    if(!Number.isInteger(p)||p<1){unplaced.push({...o,reason:'missing or invalid Position'});continue}
+    if(p>slots){unplaced.push({...o,reason:`Position ${p} is outside displayed capacity 1–${slots}`});continue}
+    if(used.has(p)){unplaced.push({...o,reason:`Position ${p} collides with another record`});continue}
+    m.set(k,p);used.add(p);
+  }
+  return {positions:m,unplaced};
+}
 function occupied(targetId,exclude=null){const m=new Map();for(const r of locKids(targetId)){if(exclude==='location:'+r.id)continue;const p=Number(r.Position);if(Number.isInteger(p)&&p>0)m.set(p,{kind:'location',r})}for(const r of activeItems(targetId)){if(exclude==='item:'+r.id)continue;const p=Number(r.Position);if(Number.isInteger(p)&&p>0)m.set(p,{kind:'item',r})}return m}
 
-function renderCrumbs(){const e=document.getElementById('crumbs'),chain=ancestors(currentId);e.innerHTML='<button class="crumb" data-root="1">Root</button>'+chain.map(r=>`<span class="sep">›</span><button class="crumb" data-id="${r.id}">${esc(locLabel(r))}</button>`).join('');e.querySelector('[data-root]').onclick=()=>{currentId=null;render()};e.querySelectorAll('[data-id]').forEach(b=>{const id=Number(b.dataset.id);b.onclick=async()=>{currentId=id;render();await syncLoc(id)};b.ondragover=e=>{e.preventDefault();b.classList.add('drop-target')};b.ondragleave=()=>b.classList.remove('drop-target');b.ondrop=async e=>{e.preventDefault();b.classList.remove('drop-target');const d=JSON.parse(e.dataTransfer.getData('text/plain'));if(d.kind==='item')await relocateItem(Number(d.id),id,null)}})}
+function renderCrumbs(){const e=document.getElementById('crumbs'),chain=ancestors(currentId);e.innerHTML='<button class="crumb" data-root="1">Root</button>'+chain.map(r=>`<span class="sep">›</span><button class="crumb" data-id="${r.id}">${esc(locLabel(r))}</button>`).join('');e.querySelector('[data-root]').onclick=()=>{currentId=null;render()};e.querySelectorAll('[data-id]').forEach(b=>{const id=Number(b.dataset.id);b.onclick=async()=>{currentId=id;render();await syncLoc(id)}})}
 function renderHeader(){const e=document.getElementById('header');if(currentId==null){e.innerHTML='<div class="header"><div><div class="name">Top-level locations</div><div class="meta">Search results are listed under the search field. Click a result to navigate directly.</div></div></div>';return}const r=locById.get(Number(currentId)),bad=invalidObjectsAt(currentId);e.innerHTML=`<div class="header"><div><div class="name">${esc(locLabel(r))}</div><div class="meta">${esc(r.Type||'Location')} · ${esc(r.LocationID||'')}<br>${esc(r.Description||'')}</div></div><div class="meta">${locKids(r.id).length} child locations · ${activeItems(r.id).length} active items${bad.length?` · <b>${bad.length} invalid positions</b>`:''}</div></div>`}
 function tileHtml(o){if(o.kind==='location'){const r=o.data,b=branchCount(r.id);return `<div class="type">${esc(r.Type||'Location')}</div><div class="tname">${esc(locLabel(r))}</div><div class="tid">${esc(r.LocationID||'')}</div><div class="count">${locKids(r.id).length} locations · ${activeItems(r.id).length} items${b?` · ${b} matches below`:''}</div>`}const r=o.data;return `<div class="type">${esc(r.ItemType||'Inventory Item')}</div><div class="tname">${esc(itemLabel(r))}</div><div class="tid">${esc(r.ItemID||'')}</div><div class="count">${esc(r.Status||'')}</div>`}
 
 function renderGrid(){
-  const g=document.getElementById('grid'),objects=objs(),sp=spec(),pos=assign(objects,sp.slots),occ=new Map(),invalid=new Set(invalidObjectsAt(currentId).map(o=>`${o.kind}:${o.id}`));
-  for(const o of objects)occ.set(pos.get(`${o.kind}:${o.id}`),o);g.style.gridTemplateColumns=`repeat(${sp.cols},minmax(0,1fr))`;g.innerHTML='';
+  const g=document.getElementById('grid'),objects=objs(),sp=spec(),assigned=assign(objects,sp.slots),pos=assigned.positions,occ=new Map();
+  for(const o of objects){const p=pos.get(`${o.kind}:${o.id}`);if(p!=null)occ.set(p,o)}
+  g.style.gridTemplateColumns=`repeat(${sp.cols},minmax(0,1fr))`;g.innerHTML='';
   for(let p=1;p<=sp.slots;p++){
     const o=occ.get(p),slot=document.createElement('div');slot.className='slot';slot.dataset.pos=p;slot.innerHTML=`<span class="slot-num">${p}</span>`;
     if(o){
       const t=document.createElement('button'),key=`${o.kind}:${o.id}`,exact=o.kind==='location'?locMatches.has(Number(o.id)):itemMatches.has(Number(o.id)),path=o.kind==='location'&&branchCount(o.id)>0;
-      t.className=`tile ${o.kind}`+(exact?' exactmatch':(!exact&&path?' pathmatch':''))+(invalid.has(key)?' invalid':'');t.draggable=true;t.innerHTML=tileHtml(o);
-      if(o.kind==='location'){t.onclick=async()=>{currentId=Number(o.id);render();await syncLoc(currentId)};t.ondragover=e=>{e.preventDefault();e.stopPropagation()};t.ondrop=async e=>{e.preventDefault();e.stopPropagation();const d=JSON.parse(e.dataTransfer.getData('text/plain'));if(d.kind==='item')await relocateItem(Number(d.id),Number(o.id),null)}}
+      t.className=`tile ${o.kind}`+(exact?' exactmatch':(!exact&&path?' pathmatch':''));t.draggable=true;t.innerHTML=tileHtml(o);
+      if(o.kind==='location'){t.onclick=async()=>{currentId=Number(o.id);render();await syncLoc(currentId)};t.ondragover=e=>{e.preventDefault();e.stopPropagation()};t.ondrop=async e=>{e.preventDefault();e.stopPropagation();const d=JSON.parse(e.dataTransfer.getData('text/plain'));await swap(d,o,p)}}
       t.ondragstart=e=>e.dataTransfer.setData('text/plain',JSON.stringify({kind:o.kind,id:o.id,from:p,parent:currentId}));slot.appendChild(t);
     } else {
       const h=document.createElement('div');h.className='emptyhint';h.textContent='+ Add existing';slot.appendChild(h);slot.onclick=()=>openAddExisting(p);
@@ -209,6 +230,12 @@ function renderGrid(){
     slot.ondragover=e=>e.preventDefault();slot.ondrop=async e=>{e.preventDefault();e.stopPropagation();const d=JSON.parse(e.dataTransfer.getData('text/plain')),target=occ.get(p);if(target)await swap(d,target,p);else await moveEmpty(d,p)};
     g.appendChild(slot);
   }
+  const ib=document.getElementById('invalidBox');
+  if(assigned.unplaced.length){
+    ib.style.display='block';
+    ib.innerHTML=`<h4>${assigned.unplaced.length} unplaced / invalid record${assigned.unplaced.length===1?'':'s'}</h4><div class="meta">These records still retain their real database location. They are not assigned to a fake visual slot.</div>`+
+      assigned.unplaced.map(o=>`<div class="invalidrow"><b>${esc(o.kind==='location'?locLabel(o.data):itemLabel(o.data))}</b> · ${esc(o.reason)}</div>`).join('');
+  }else{ib.style.display='none';ib.innerHTML=''}
 }
 
 function existingEventFields(fields){const o={};for(const [k,v] of Object.entries(fields))if(eventCols.has(k)&&v!==undefined&&v!==null)o[k]=v;return o}
@@ -249,7 +276,7 @@ function renderPickList(){
   if(modalMode==='item'){
     rows=invRows.filter(r=>norm(r.Status)==='active'&&(!s||itemText(r).includes(s))).slice(0,100).map(r=>({id:r.id,title:itemLabel(r),meta:`${r.ItemType||'Item'} · ${r.ItemID||''} · ${locById.get(Number(r.locationRef))?.Description||'Unassigned'}`}));
   }else{
-    rows=locRows.filter(r=>locIsActive(r)&&String(r.Type||'')!=='Room'&&Number(r.id)!==Number(currentId)&&!isDescendant(currentId,r.id)&&(!s||locText(r).includes(s))).slice(0,100).map(r=>({id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`}));
+    rows=locRows.filter(r=>locEffectivelyActive(r)&&String(r.Type||'')!=='Room'&&Number(r.id)!==Number(currentId)&&!isDescendant(currentId,r.id)&&(!s||locText(r).includes(s))).slice(0,100).map(r=>({id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`}));
   }
   e.innerHTML=rows.length?rows.map(r=>`<div class="pick" data-id="${r.id}"><div class="picktitle">${esc(r.title)}</div><div class="pickmeta">${esc(r.meta)}</div></div>`).join(''):'<div class="pickmeta" style="padding:12px">No matches.</div>';
   e.querySelectorAll('.pick').forEach(x=>x.onclick=async()=>{const id=Number(x.dataset.id);try{if(modalMode==='item')await relocateItem(id,currentId,modalSlot,true);else await relocateLocation(id,currentId,modalSlot,true);closeModal();await load()}catch(err){show('Relocation failed: '+(err.message||err),'err')}});
