@@ -52,3 +52,7 @@ Tested with a mocked Grist API under a Chromium browser:
 - Mixed item types, label previews, duplicate rows, and CSV download.
 
 **This is not yet tested against your live Grist document or physical label stock.** Try a small test batch before relying on it for printing.
+
+## v1.1: Today field
+
+The field mapping dropdown includes **Today (date of label generation)**. RectangleLine5 defaults to Today for new label profiles. The date is calculated when **Build label preview** is clicked, using the browser's local date, in MM/DD/YYYY format. Previously saved profiles using the old default Inventory.ItemID in RectangleLine5 are upgraded to Today. Other customized choices are retained.
