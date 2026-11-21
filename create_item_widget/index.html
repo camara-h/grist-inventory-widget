@@ -101,6 +101,53 @@ let busy=false;
 grist.ready({requiredAccess:'full'});
 
 function normName(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
+function cleanFieldName(v){return String(v??'').replace(/\u00a0/g,' ').trim();}
+function positivePosition(v){const n=Number(v);return Number.isInteger(n)&&n>0?n:0;}
+function normalizeDateValue(value){
+  const raw=String(value??'').trim();
+  if(!raw)return '';
+  let year,month,day;
+  if(/^\d{5}(?:\.0+)?$/.test(raw)){
+    const serial=Number(raw);
+    if(serial<20000||serial>80000)throw new Error('Excel date serial outside supported range: '+raw);
+    const utc=new Date(Date.UTC(1899,11,30)+serial*86400000);
+    year=utc.getUTCFullYear();month=utc.getUTCMonth()+1;day=utc.getUTCDate();
+  }else{
+    let m=raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if(m){year=Number(m[1]);month=Number(m[2]);day=Number(m[3]);}
+    else{
+      m=raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+      if(!m)throw new Error('Unsupported date "'+raw+'". Use YYYY-MM-DD or MM/DD/YYYY.');
+      const a=Number(m[1]),b=Number(m[2]);year=Number(m[3]);
+      if(a>12 && b<=12){day=a;month=b;}
+      else if(b>12 && a<=12){month=a;day=b;}
+      else if(a<=12 && b<=12){month=a;day=b;} // Explicit default: US month/day/year.
+      else throw new Error('Invalid date: '+raw);
+    }
+  }
+  const dt=new Date(Date.UTC(year,month-1,day));
+  if(dt.getUTCFullYear()!==year||dt.getUTCMonth()!==month-1||dt.getUTCDate()!==day){
+    throw new Error('Invalid date: '+raw);
+  }
+  return dt.getTime()/1000; // Grist Date columns expect Unix seconds, not milliseconds.
+}
+function metadataValue(field,raw){
+  const value=String(raw??'').trim();
+  if(!value)return undefined;
+  const type=String(field.FieldType||'Text').trim().toLowerCase();
+  if(type==='date')return normalizeDateValue(value);
+  if(type==='choice list'||type==='choicelist'){
+    const choices=value.split(/[;,\n]/).map(x=>x.trim()).filter(Boolean);
+    return ['L',...choices]; // Grist ChoiceList typed cell value.
+  }
+  if(type==='number'||type==='numeric'){
+    const num=Number(value);
+    if(!Number.isFinite(num))throw new Error((field.Label||field.FieldName)+' must be numeric: '+value);
+    return num;
+  }
+  return value;
+}
+
 async function findTable(candidates, requiredColumns=[]){
   const tables=await grist.docApi.listTables();
   for(const c of candidates){if(tables.includes(c)) return c;}
@@ -134,14 +181,14 @@ function parseOptions(v){
   if(Array.isArray(v)) return v.map(String);
   return String(v).split(/[,;\n]/).map(x=>x.trim()).filter(Boolean);
 }
-function boolish(v){return v===true || v===1 || String(v).toLowerCase()==='true' || String(v).toLowerCase()==='yes';}
+function boolish(v){return v===true || v===1 || ['true','yes','1'].includes(String(v??'').replace(/\u00a0/g,' ').trim().toLowerCase());}
 
 function fieldInputHTML(f, shared=false){
   const id=(shared?'shared_':'row_')+f.FieldName;
   const req=boolish(f.Required)?' *':'';
   const def=f.DefaultValue ?? '';
   const opts=parseOptions(f.Options);
-  const type=String(f.FieldType||'Text').toLowerCase();
+  const type=String(f.FieldType||'Text').trim().toLowerCase().replace('choise','choice');
 
   if(type==='choice' && opts.length){
     return `<div><label>${f.Label||f.FieldName}${req}</label><select id="${id}" data-field="${f.FieldName}">
@@ -149,7 +196,7 @@ function fieldInputHTML(f, shared=false){
     </select></div>`;
   }
   if(type==='date'){
-    return `<div><label>${f.Label||f.FieldName}${req}</label><input id="${id}" data-field="${f.FieldName}" type="date" value="${def||''}"></div>`;
+    return `<div><label>${f.Label||f.FieldName}${req}</label><input id="${id}" data-field="${f.FieldName}" type="text" placeholder="YYYY-MM-DD or MM/DD/YYYY" value="${def||''}"></div>`;
   }
   if(type==='number'){
     return `<div><label>${f.Label||f.FieldName}${req}</label><input id="${id}" data-field="${f.FieldName}" type="number" value="${def||''}"></div>`;
@@ -187,7 +234,14 @@ async function setup(){
       grist.docApi.fetchTable(metadataTableId)
     ]);
 
-    locationRows=locT.id.map((id,i)=>({id,locationId:locT.LocationID?.[i] ?? '',label:locationLabel(locT,i)}));
+    locationRows=locT.id.map((id,i)=>({
+      id, locationId:locT.LocationID?.[i] ?? '', label:locationLabel(locT,i),
+      parentId:locT.ParentLocationID?.[i] ?? null,
+      active:locT.Active?.[i] ?? true,
+      position:locT.Position?.[i] ?? 0,
+      rows:locT.Rows?.[i] ?? 0,
+      columns:locT.Columns?.[i] ?? 0
+    }));
     refreshLocations();
     document.getElementById('locationSearch').addEventListener('input',refreshLocations);
 
@@ -204,13 +258,13 @@ async function setup(){
       // 1) a Grist Reference -> ItemTypes (stored internally as that row's numeric id), or
       // 2) plain text containing the TypeName.
       ItemType:metaT.ItemType?.[i] ?? '',
-      FieldName:metaT.FieldName?.[i] ?? '',
-      Label:metaT.Label?.[i] ?? '',
-      FieldType:metaT.FieldType?.[i] ?? 'Text',
+      FieldName:cleanFieldName(metaT.FieldName?.[i]),
+      Label:String(metaT.Label?.[i]??'').replace(/\u00a0/g,' ').trim(),
+      FieldType:String(metaT.FieldType?.[i]??'Text').trim(),
       Required:metaT.Required?.[i] ?? false,
       SharedInBatch:metaT.SharedInBatch?.[i] ?? false,
-      DefaultValue:metaT.DefaultValue?.[i] ?? '',
-      Options:metaT.Options?.[i] ?? '',
+      DefaultValue:String(metaT.DefaultValue?.[i]??'').trim(),
+      Options:String(metaT.Options?.[i]??'').trim(),
       Order:metaT.Order?.[i] ?? 999,
       Active:metaT.Active?.[i] ?? true
     })).filter(x=>x.FieldName && boolish(x.Active));
@@ -304,11 +358,11 @@ function rowTemplate(n){
     <td><input data-col="ItemName"></td>
     ${perRow.map(f=>{
       const opts=parseOptions(f.Options);
-      const type=String(f.FieldType||'Text').toLowerCase();
+      const type=String(f.FieldType||'Text').trim().toLowerCase().replace('choise','choice');
       if(type==='choice' && opts.length){
         return `<td><select data-col="${f.FieldName}"><option value=""></option>${opts.map(o=>`<option>${o}</option>`).join('')}</select></td>`;
       }
-      return `<td><input data-col="${f.FieldName}" ${type==='date'?'type="date"':''} ${type==='number'?'type="number"':''}></td>`;
+      return `<td><input data-col="${f.FieldName}" ${type==='date'?'type="text" placeholder="YYYY-MM-DD or MM/DD/YYYY"':''} ${type==='number'?'type="number"':''}></td>`;
     }).join('')}
   </tr>`;
 }
@@ -387,6 +441,49 @@ function validateRows(){
 
 async function tableColumns(tableId){const t=await grist.docApi.fetchTable(tableId);return new Set(Object.keys(t));}
 function onlyExisting(fields,cols){const out={};for(const [k,v] of Object.entries(fields)){if(cols.has(k)&&v!==undefined&&v!=='')out[k]=v;}return out;}
+async function planPositions(locationRef,count){
+  const selected=locationRows.find(loc=>Number(loc.id)===locationRef);
+  if(!selected)throw new Error('Selected location no longer exists.');
+  if(!boolish(selected.active))throw new Error('The selected location is inactive.');
+  const inv=await grist.docApi.fetchTable(INVENTORY_TABLE);
+  const occupied=new Set();
+  for(let i=0;i<inv.id.length;i++){
+    if(Number(inv.LocationID?.[i])!==locationRef)continue;
+    const status=String(inv.Status?.[i]??'Active').trim().toLowerCase();
+    if(status!=='active')continue;
+    const pos=positivePosition(inv.Position?.[i]);
+    if(pos)occupied.add(pos);
+  }
+  for(const loc of locationRows){
+    if(Number(loc.parentId)===locationRef&&boolish(loc.active)){
+      const pos=positivePosition(loc.position);
+      if(pos)occupied.add(pos);
+    }
+  }
+  const rows=positivePosition(selected.rows),cols=positivePosition(selected.columns);
+  const capacity=rows&&cols?rows*cols:null;
+  const positions=[];
+  let next=1;
+  for(let i=0;i<count;i++){
+    while(occupied.has(next))next++;
+    if(capacity!==null&&next>capacity){
+      throw new Error(`Not enough free positions in ${selected.locationId}. Capacity ${capacity}; need ${count} positions. No records created.`);
+    }
+    positions.push(next);occupied.add(next);next++;
+  }
+  return positions;
+}
+function buildMetadataForRow(row,shared){
+  const merged={...shared};
+  currentFields.filter(f=>!boolish(f.SharedInBatch)).forEach(f=>merged[f.FieldName]=row[f.FieldName]||'');
+  const out={};
+  for(const f of currentFields){
+    const value=metadataValue(f,merged[f.FieldName]);
+    if(value!==undefined)out[f.FieldName]=value;
+  }
+  return out;
+}
+
 
 async function resolveMetadataTable(){
   if(!currentType?.MetadataTable)return null;
@@ -405,62 +502,73 @@ async function createBatch(){
   const locationRef=Number(document.getElementById('location').value);
   const project=document.getElementById('project').value.trim();
   const metadataDest=await resolveMetadataTable();
-
-  if(currentType.MetadataTable && !metadataDest){
+  if(currentType.MetadataTable&&!metadataDest){
     showStatus(`Metadata destination table "${currentType.MetadataTable}" was not found.`,'err');return;
   }
-
-  if(!confirm(`Create ${check.valid} ${currentType.TypeName} item(s)?`))return;
-
-  busy=true;document.getElementById('createBtn').disabled=true;showStatus('Creating batch…','warn');
-
+  busy=true;
+  document.getElementById('createBtn').disabled=true;
+  showStatus('Checking column names, dates, and available positions…','warn');
   try{
     const invOps=grist.getTable(INVENTORY_TABLE),eventOps=grist.getTable(EVENTS_TABLE);
     const invCols=await tableColumns(INVENTORY_TABLE),eventCols=await tableColumns(EVENTS_TABLE);
     const metaOps=metadataDest?grist.getTable(metadataDest):null;
     const metaCols=metadataDest?await tableColumns(metadataDest):new Set();
+    if(!invCols.has('Position'))throw new Error('Inventory.Position column is missing. No records created.');
+    if(!invCols.has('LocationID'))throw new Error('Inventory.LocationID column is missing. No records created.');
+    if(currentFields.length&&!metaOps)throw new Error('Metadata fields are configured but there is no subtype table. No records created.');
+    if(metaOps){
+      if(!metaCols.has('Item'))throw new Error(`Missing Inventory reference column "Item" in ${metadataDest}. No records created.`);
+      const missing=currentFields.filter(f=>!metaCols.has(f.FieldName)).map(f=>f.FieldName);
+      if(missing.length)throw new Error(`Metadata columns missing from ${metadataDest}: ${missing.join(', ')}. No records created.`);
+    }
+    const plannedMetadata=check.rows.map(r=>buildMetadataForRow(r,check.shared));
+    const positions=await planPositions(locationRef,check.rows.length);
+    if(!confirm(`Create ${check.valid} ${currentType.TypeName} item(s) in positions ${positions.join(', ')}?`)){
+      clearStatus();return;
+    }
 
     let created=0;const failures=[];
-
-    for(const r of check.rows){
+    for(let i=0;i<check.rows.length;i++){
+      const r=check.rows[i];
+      let itemRowId=null,metaCreated=false;
       try{
         const invRec=await invOps.create({fields:onlyExisting({
           ItemName:r.ItemName,
           ItemType:currentType.TypeName,
           LocationID:locationRef,
+          Position:positions[i],
           Status:'Active',
           Project:project||undefined
         },invCols)});
-        const itemRowId=invRec.id;
-
+        itemRowId=invRec.id;
         if(metaOps){
-          const merged={...check.shared};
-          currentFields.filter(f=>!boolish(f.SharedInBatch)).forEach(f=>merged[f.FieldName]=r[f.FieldName]||'');
-          const metaFields=onlyExisting({
+          await metaOps.create({fields:onlyExisting({
             Item:itemRowId,
             Project:project||undefined,
-            ...merged
-          },metaCols);
-          await metaOps.create({fields:metaFields});
+            ...plannedMetadata[i]
+          },metaCols)});
+          metaCreated=true;
         }
-
         await eventOps.create({fields:onlyExisting({
           Item:itemRowId,
           EventType:'Created',
           ToLocation:locationRef,
           Notes:`Created from universal Create Items widget (${currentType.TypeName})`
         },eventCols)});
-
         created++;
-      }catch(e){failures.push(`${r.ItemName}: ${e.message||e}`);}
+      }catch(e){
+        const state=itemRowId?`Inventory row ${itemRowId} MAY EXIST; subtype ${metaCreated?'created':'not confirmed'}`:'No Inventory row confirmed';
+        failures.push(`${r.ItemName}: ${e.message||e}. ${state}. Stopped remaining batch to prevent further partial records.`);
+        break;
+      }
     }
-
-    if(failures.length)showStatus(`Created ${created} of ${check.rows.length} items.\n\nFailures:\n${failures.join('\n')}`,'warn');
-    else{
-      showStatus(`Success. Created ${created} Inventory item(s), ${metadataDest?created:0} subtype metadata row(s), and ${created} Created event(s).`,'ok');
+    if(failures.length){
+      showStatus(`Completed ${created} of ${check.rows.length} items. Do not retry the entire batch until checking for partial records.\n\n${failures.join('\n')}`,'err');
+    }else{
+      showStatus(`Success. Created ${created} Inventory item(s), ${metaOps?created:0} subtype metadata row(s), and ${created} Created event(s).`,'ok');
       buildGrid(currentFields.filter(f=>!boolish(f.SharedInBatch)));
     }
-  }catch(e){showStatus('Creation failed: '+(e.message||e),'err');}
+  }catch(e){showStatus('Nothing created: '+(e.message||e),'err');}
   finally{busy=false;document.getElementById('createBtn').disabled=false;}
 }
 
