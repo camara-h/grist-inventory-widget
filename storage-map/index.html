@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Unified Storage Map v5.1</title>
+<title>Unified Storage Map v5.2</title>
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#252631}
@@ -12,8 +12,8 @@ body{margin:0;padding:16px;background:#fff}
 h2{margin:0 0 4px}.sub,.meta,.note{color:#6d7078;font-size:.82rem}
 .controls{display:flex;gap:7px;flex-wrap:wrap}.ctrl,.crumb,.tab{border:0;border-radius:8px;background:#eef1f4;padding:7px 10px;font-weight:650;cursor:pointer}
 .searchwrap{position:relative;margin:12px 0}.searchbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.searchbar input,.modal input,.modal select{box-sizing:border-box;padding:9px 10px;border:1px solid #cfd3da;border-radius:8px}
-.searchbar input{flex:1;min-width:260px}
+.searchbar input,.searchbar select,.modal input,.modal select{box-sizing:border-box;padding:9px 10px;border:1px solid #cfd3da;border-radius:8px}
+.searchbar input{flex:1;min-width:210px}.searchbar select{max-width:230px;min-width:170px;background:#fff}
 .results{position:absolute;z-index:20;left:0;right:110px;top:42px;background:white;border:1px solid #d9dce2;border-radius:10px;box-shadow:0 7px 22px rgba(0,0,0,.13);max-height:330px;overflow:auto;display:none}
 .result{padding:9px 11px;border-bottom:1px solid #eee;cursor:pointer}.result:last-child{border-bottom:0}.result:hover,.result.sel{background:#f4f7f9}
 .result .rtitle{font-weight:700}.result .rmeta{font-size:.76rem;color:#6d7078;margin-top:2px}
@@ -42,7 +42,7 @@ h2{margin:0 0 4px}.sub,.meta,.note{color:#6d7078;font-size:.82rem}
 </div>
 
 <div class="searchwrap">
-  <div class="searchbar"><input id="search" autocomplete="off" placeholder="Search locations, ItemID, name, catalogue, lot, metadata..."><button id="clearSearch" class="ctrl">CLEAR</button><span id="searchCount" class="sub"></span></div>
+  <div class="searchbar"><input id="search" autocomplete="off" placeholder="Search locations, ItemID, name, catalogue, lot, metadata..."><select id="searchScope" aria-label="Search category"><option value="managed">Lab inventory + locations</option><option value="all">Everything</option><option value="locations">Locations only</option><option value="inventory">All inventory</option><option value="joslin">JoslinItems only</option></select><button id="clearSearch" class="ctrl">CLEAR</button><span id="searchCount" class="sub"></span></div>
   <div id="searchResults" class="results"></div>
 </div>
 
@@ -76,6 +76,7 @@ let locTable=null, locRows=[], invRows=[], locById=new Map(), itemById=new Map()
 let q='', locMatches=new Set(), itemMatches=new Set(), searchHits=[], searchSel=0;
 let subtypeTables=[], subtypeRowsByInventory=new Map(), eventCols=new Set();
 let modalSlot=null, modalMode='item';
+let searchScope='managed';
 
 grist.ready({requiredAccess:'full',allowSelectBy:true});
 
@@ -146,14 +147,50 @@ function itemText(r){
 }
 function locText(r){return Object.entries(r).filter(([k,v])=>k!=='id'&&k!=='parentId'&&scalar(v)&&v!==''&&v!=null).map(([k,v])=>`${k}:${v}`).join(' ').toLowerCase()}
 
+function isJoslin(r){return ['joslinitem','joslinitems'].includes(norm(r.ItemType).replace(/[^a-z0-9]/g,''))}
+function allowedSearchItem(r){
+  if(searchScope==='locations')return false;
+  if(searchScope==='managed')return !isJoslin(r);
+  if(searchScope==='joslin')return isJoslin(r);
+  if(searchScope==='all'||searchScope==='inventory')return true;
+  return norm(r.ItemType)===norm(searchScope.slice(5));
+}
+function exactSearchRank(h,s){
+  const r=h.kind==='location'?locById.get(Number(h.id)):itemById.get(Number(h.id));
+  if(!r)return 4;
+  const ids=h.kind==='location'?[r.LocationID]:[r.ItemID,r.Barcode,r.BarcodeID,r.LabUniqueID];
+  if(ids.some(v=>norm(v)===s))return 0;
+  if(norm(h.title)===s)return 1;
+  if(ids.some(v=>norm(v).startsWith(s)))return 2;
+  if(norm(h.title).startsWith(s))return 3;
+  return 4;
+}
+function populateSearchScopes(){
+  const sel=document.getElementById('searchScope'),previous=sel.value||searchScope;
+  sel.querySelectorAll('option[data-dynamic]').forEach(o=>o.remove());
+  const types=[...new Set(invRows.map(r=>String(r.ItemType||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  for(const type of types){
+    if(['joslinitem','joslinitems'].includes(norm(type).replace(/[^a-z0-9]/g,'')))continue;
+    const o=document.createElement('option');o.value='type:'+type;o.textContent=type;o.dataset.dynamic='1';sel.appendChild(o);
+  }
+  sel.value=[...sel.options].some(o=>o.value===previous)?previous:'managed';
+  searchScope=sel.value;
+}
 function computeMatches(){
-  locMatches=new Set(); itemMatches=new Set(); searchHits=[];
+  locMatches=new Set();itemMatches=new Set();searchHits=[];
   const s=norm(q);
   if(!s){document.getElementById('searchCount').textContent='';renderSearchResults();return}
-  for(const r of locRows)if(locEffectivelyActive(r)&&locText(r).includes(s)){locMatches.add(Number(r.id));searchHits.push({kind:'location',id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`})}
-  for(const r of invRows)if(norm(r.Status)==='active'&&itemText(r).includes(s)){itemMatches.add(Number(r.id));const l=locById.get(Number(r.locationRef));searchHits.push({kind:'item',id:r.id,title:itemLabel(r),meta:`${r.ItemType||'Item'} · ${r.ItemID||''} · ${l?.Description||pathFor(r.locationRef)||'Unassigned'}`})}
-  searchHits.sort((a,b)=>{const ae=norm(a.title)===s?0:1,be=norm(b.title)===s?0:1;return ae-be||a.title.localeCompare(b.title)});
-  searchSel=0; document.getElementById('searchCount').textContent=`${searchHits.length} match${searchHits.length===1?'':'es'}`;renderSearchResults();
+  if(['managed','all','locations'].includes(searchScope)){
+    for(const r of locRows)if(locEffectivelyActive(r)&&locText(r).includes(s)){
+      locMatches.add(Number(r.id));searchHits.push({kind:'location',id:r.id,title:locLabel(r),meta:`${r.Type||'Location'} · ${r.LocationID||''} · ${r.Description||pathFor(r.id)}`});
+    }
+  }
+  for(const r of invRows)if(norm(r.Status)==='active'&&allowedSearchItem(r)&&itemText(r).includes(s)){
+    itemMatches.add(Number(r.id));const l=locById.get(Number(r.locationRef));
+    searchHits.push({kind:'item',id:r.id,title:itemLabel(r),meta:`${r.ItemType||'Item'} · ${r.ItemID||''} · ${l?.Description||pathFor(r.locationRef)||'Unassigned'}`});
+  }
+  searchHits.sort((a,b)=>exactSearchRank(a,s)-exactSearchRank(b,s)||a.title.localeCompare(b.title));
+  searchSel=0;document.getElementById('searchCount').textContent=`${searchHits.length} match${searchHits.length===1?'':'es'}`;renderSearchResults();
 }
 function renderSearchResults(){
   const e=document.getElementById('searchResults');
@@ -178,6 +215,7 @@ async function load(){
   locById=new Map(locRows.map(r=>[Number(r.id),r]));itemById=new Map(invRows.map(r=>[Number(r.id),r]));
   try{eventCols=new Set(Object.keys(await grist.docApi.fetchTable(EVENTS)))}catch(e){eventCols=new Set()}
   await loadSubtypeSearchData();
+  populateSearchScopes();
   if(currentId!=null && !locIsActive(locById.get(Number(currentId)))){
     let p=locById.get(Number(currentId));
     while(p && !locIsActive(p)) p=p.parentId?locById.get(Number(p.parentId)):null;
@@ -291,6 +329,7 @@ function render(){renderCrumbs();renderHeader();renderGrid();document.getElement
 document.getElementById('rootBtn').onclick=()=>{currentId=null;render()};
 document.getElementById('upBtn').onclick=async()=>{if(currentId==null)return;const r=locById.get(currentId);currentId=r?.parentId||null;render();if(currentId!=null)await syncLoc(currentId)};
 document.getElementById('refreshBtn').onclick=load;
+document.getElementById('searchScope').onchange=e=>{searchScope=e.target.value;computeMatches();render()};
 document.getElementById('search').oninput=e=>{q=e.target.value;computeMatches();render()};
 document.getElementById('search').onkeydown=e=>{if(e.key==='ArrowDown'){e.preventDefault();searchSel=Math.min(searchSel+1,searchHits.length-1);renderSearchResults()}else if(e.key==='ArrowUp'){e.preventDefault();searchSel=Math.max(0,searchSel-1);renderSearchResults()}else if(e.key==='Enter'&&searchHits.length){e.preventDefault();openHit(searchHits[searchSel]||searchHits[0])}else if(e.key==='Escape')document.getElementById('searchResults').style.display='none'};
 document.getElementById('clearSearch').onclick=()=>{document.getElementById('search').value='';q='';computeMatches();render()};
